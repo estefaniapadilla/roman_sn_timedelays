@@ -171,6 +171,8 @@ def measure_one(
     time_range=(-50, 300),
     model_name="salt2-extended",
     lens_index=0,
+    max_delay_days=150.0,
+    min_image_snr=10.0,
 ):
     """Measure time delays for one lensed SN system using SNTD + SALT2-extended.
 
@@ -190,7 +192,6 @@ def measure_one(
         rng = np.random.default_rng()
 
     z_lens = float(lens.deflector_redshift)
-    MIN_SNR = 5.0
 
     result = {
         "status": "fail", "z_lens": z_lens, "z_source": z_source,
@@ -245,7 +246,7 @@ def measure_one(
     dropped = []
     for i, (name, tbl) in enumerate(image_tables.items()):
         snr = image_snr.get(name, 0)
-        if snr >= MIN_SNR:
+        if snr >= min_image_snr:
             kept_tables[name] = tbl
             kept_arrival.append(arrival_times[i])
         else:
@@ -257,7 +258,7 @@ def measure_one(
 
     if len(kept_tables) < 2:
         snr_str = ", ".join(f"{k}={v:.1f}" for k, v in image_snr.items())
-        result["status"] = f"low_snr: only {len(kept_tables)} images with SNR>={MIN_SNR} ({snr_str})"
+        result["status"] = f"low_snr: only {len(kept_tables)} images with SNR>={min_image_snr} ({snr_str})"
         print(f"    SKIP: {result['status']}  ({time.time()-t_total_start:.1f}s total)")
         return result
 
@@ -269,6 +270,26 @@ def measure_one(
         true_delays[name] = float(arrival_times[i] - arrival_times[0])
     result["true_delays"] = true_delays
     print(f"    true delays: {true_delays}")
+
+    # Skip systems with very large delays: the SN fades before the second image
+    # rises, so the two light curves don't overlap and SNTD's MCMC has nothing
+    # to cross-correlate. These are also rare extreme-mass lens configurations
+    # that are not the primary Roman science target.
+    max_delay = max(true_delays.values())
+    if max_delay > max_delay_days:
+        result["status"] = f"delay_too_large: {max_delay:.1f} d > {max_delay_days:.0f} d limit"
+        print(f"    SKIP: {result['status']}  ({time.time()-t_total_start:.1f}s total)")
+        return result
+
+    # Require all kept images to meet the SNR threshold. An image just above
+    # the detection floor (SNR~5-9) contributes a near-flat likelihood term
+    # that slows MCMC convergence without adding meaningful delay information.
+    low_snr_images = [n for n, s in image_snr.items() if n in image_tables and s < min_image_snr]
+    if low_snr_images:
+        snr_str = ", ".join(f"{n}={image_snr[n]:.1f}" for n in low_snr_images)
+        result["status"] = f"image_snr_too_low: {snr_str} < {min_image_snr:.0f}"
+        print(f"    SKIP: {result['status']}  ({time.time()-t_total_start:.1f}s total)")
+        return result
 
     t0 = time.time()
     try:
