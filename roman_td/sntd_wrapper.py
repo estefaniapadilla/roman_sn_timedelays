@@ -322,7 +322,7 @@ def measure_one(
             },
             method="parallel",
             nMul=1,       # 1 MCMC chain per image; increase for single-system runs
-            verbose=True,
+            verbose=False,
             guess_amplitude=True,
         )
         print(f"    SNTD fit: {time.time()-t0:.1f}s")
@@ -336,17 +336,27 @@ def measure_one(
             td = par.time_delays
             td_err = getattr(par, "time_delay_errors", None)
 
-            for i, name in enumerate(image_names):
-                if i == 0:
-                    fit_delays[name] = 0.0
-                    fit_delay_errors[name] = [0.0, 0.0]
+            # Reference image (index 0) has delay = 0 by definition
+            fit_delays[image_names[0]] = 0.0
+            fit_delay_errors[image_names[0]] = [0.0, 0.0]
+
+            for name in image_names[1:]:
+                # par.time_delays can be a dict keyed by image name OR a list/array
+                # depending on the SNTD version; handle both
+                if isinstance(td, dict):
+                    fit_delays[name] = float(td.get(name, np.nan))
                 else:
-                    idx = i - 1
+                    idx = image_names.index(name) - 1
                     fit_delays[name] = float(td[idx]) if idx < len(td) else np.nan
-                    if td_err is not None and idx < len(td_err):
-                        fit_delay_errors[name] = [float(td_err[idx][0]), float(td_err[idx][1])]
-                    else:
-                        fit_delay_errors[name] = [np.nan, np.nan]
+
+                if td_err is not None:
+                    err = td_err.get(name, [np.nan, np.nan]) if isinstance(td_err, dict) \
+                          else (td_err[image_names.index(name) - 1]
+                                if image_names.index(name) - 1 < len(td_err) else [np.nan, np.nan])
+                    fit_delay_errors[name] = [float(err[0]), float(err[1])] \
+                                             if hasattr(err, "__len__") else [float(err), float(err)]
+                else:
+                    fit_delay_errors[name] = [np.nan, np.nan]
 
         result["fit_delays"] = fit_delays
         result["fit_delay_errors"] = fit_delay_errors
