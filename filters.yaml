@@ -1,0 +1,39 @@
+standards_root: /home/epadill/bayesn/bayesn/bayesn-filters/standards
+standards:
+  bd17:
+    path: bd_17d4708_stisnic_007.dat
+  vega:
+    path: alpha_lyr_stis_010.fits
+filters_root: /home/epadill/Roman_filters
+filters:
+  F062:
+    magsys: ab
+    magzero: 0
+    path: Roman_WFI.F062.dat
+    lam_unit: micron
+  F087:
+    magsys: ab
+    magzero: 0
+    path: Roman_WFI.F087.dat
+    lam_unit: micron
+  F106:
+    magsys: ab
+    magzero: 0
+    path: Roman_WFI.F106.dat
+    lam_unit: micron
+  F129:
+    magsys: ab
+    magzero: 0
+    path: Roman_WFI.F129.dat
+    lam_unit: micron
+  # --- Roman HLTDS deep tier adds H and F ---
+  F158:
+    magsys: ab
+    magzero: 0
+    path: Roman_WFI.F158.dat
+    lam_unit: micron
+  F184:
+    magsys: ab
+    magzero: 0
+    path: Roman_WFI.F184.dat
+    lam_unit: micron
