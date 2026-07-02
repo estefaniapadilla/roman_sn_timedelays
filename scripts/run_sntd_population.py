@@ -34,9 +34,9 @@ warnings.filterwarnings("ignore", message=r".*bandpass.*outside spectral range.*
 warnings.filterwarnings("ignore", message=r".*invalid value encountered.*")
 warnings.filterwarnings("ignore", message=r".*divide by zero.*")
 
-from roman_td.sntd_wrapper import measure_one, register_roman_bands, DEFAULT_DEPTH_5SIG
+from roman_td.sntd_wrapper import measure_one, register_roman_bands, DEFAULT_DEPTH_5SIG, FIT_PRESETS
 
-# ── survey config: match the population you simulated ────────────────────────
+# ── survey config: match the population 1 simulated ────────────────────────
 PICKLE = "/home/epadill/time_delays/data/roman_deep_lens_population_compat.pkl"
 SURVEY = "time_domain_deep"
 if SURVEY == "time_domain_deep":
@@ -45,16 +45,17 @@ else:
     BANDS = ["F062", "F087", "F106", "F129", "F158"]
 
 CADENCE = 5.0       # days between visits
-N_SYSTEMS = 50      # stop after this many successful fits (0 = all)
+N_SYSTEMS = 1000    # stop after this many successful fits (0 = no limit, run the full population)
 SEED = 42
-N_JOBS = 1          # parallel workers (-1 = all cores)
+N_JOBS = 32         # use all cores; set to -1 to auto-detect
 SAVE_EVERY = 10
+FIT_MODE = "fast"  # "robust" (wide, data-driven bounds, slow) or "fast" (narrow, trial_fit-recentered, capped)
 
 OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, "delay_benchmark.ecsv")
+OUTPUT_FILE = os.path.join(OUTPUT_DIR, f"delay_benchmark_{FIT_MODE}.ecsv")
 
 
-def process_one_lens(i, lens, bands, cadence, depth, seed_offset):
+def process_one_lens(i, lens, bands, cadence, depth, seed_offset, fit_mode):
     """Wrapper for parallel execution — each worker gets its own RNG seed."""
     import warnings
     warnings.filterwarnings("ignore")
@@ -65,13 +66,17 @@ def process_one_lens(i, lens, bands, cadence, depth, seed_offset):
         return None
 
     rng = np.random.default_rng(seed_offset + i)
-    return measure_one(
+    result = measure_one(
         lens, bands, zS,
         cadence_days=cadence,
         depth_5sig=depth,
         rng=rng,
         lens_index=i,
+        **FIT_PRESETS[fit_mode],
     )
+    if result is not None:
+        result["lens_index"] = i
+    return result
 
 
 def main():
@@ -83,9 +88,9 @@ def main():
     pop = payload["lens_population"]
     print(f"Loaded {len(pop)} lenses")
 
-    print(f"\nRunning with {N_JOBS} workers...")
-    all_results = Parallel(n_jobs=N_JOBS, verbose=10)(
-        delayed(process_one_lens)(i, lens, BANDS, CADENCE, DEFAULT_DEPTH_5SIG, SEED)
+    print(f"\nRunning with {N_JOBS} workers, fit_mode={FIT_MODE!r}...")
+    results_gen = Parallel(n_jobs=N_JOBS, verbose=10, return_as="generator_unordered")(
+        delayed(process_one_lens)(i, lens, BANDS, CADENCE, DEFAULT_DEPTH_5SIG, SEED, FIT_MODE)
         for i, lens in enumerate(pop)
     )
 
@@ -93,7 +98,7 @@ def main():
     rows = []
     n_done = 0
 
-    for i, res in enumerate(all_results):
+    for res in results_gen:
         if res is None:
             continue
         if res["status"] != "ok":
@@ -101,33 +106,49 @@ def main():
             fail_counts[reason] = fail_counts.get(reason, 0) + 1
             continue
 
+        fit_time_s = res["diagnostics"].get("fit_time_s", np.nan)
         for img, td_true in res["true_delays"].items():
             if img == "image_1":
                 continue
             td_fit = res["fit_delays"].get(img, np.nan)
             td_err = res["fit_delay_errors"].get(img, [np.nan, np.nan])
             rows.append({
-                "lens_index": i, "image": img,
+                "lens_index": res["lens_index"], "image": img,
                 "z_lens": res["z_lens"], "z_source": res["z_source"],
                 "n_images": res["n_images"],
                 "true_delay": td_true, "fit_delay": td_fit,
                 "fit_err_lo": td_err[0] if np.ndim(td_err) else td_err,
                 "fit_err_hi": td_err[1] if np.ndim(td_err) else td_err,
                 "residual": td_fit - td_true,
+                "fit_mode": FIT_MODE, "fit_time_s": fit_time_s,
             })
         n_done += 1
+
+        if n_done % 5 == 0 and rows:
+            Table(rows).write(OUTPUT_FILE, overwrite=True)
+            print(f"  [checkpoint] {n_done} fits done -> {OUTPUT_FILE}")
+
+        if N_SYSTEMS and n_done >= N_SYSTEMS:
+            print(f"  Reached N_SYSTEMS={N_SYSTEMS} successful fits, stopping early "
+                  f"(remaining in-flight workers will finish their current fit but "
+                  f"won't be collected).")
+            break
 
     elapsed = time.time() - t_start
     tab = Table(rows)
     tab.write(OUTPUT_FILE, overwrite=True)
     res_arr = np.array([r["residual"] for r in rows if np.isfinite(r["residual"])])
+    time_arr = np.array([r["fit_time_s"] for r in rows if np.isfinite(r["fit_time_s"])])
 
     print(f"\n{'='*60}")
-    print(f"Measured {n_done} systems, {len(rows)} delays in {elapsed/60:.1f} min")
+    print(f"Measured {n_done} systems, {len(rows)} delays in {elapsed/60:.1f} min  (fit_mode={FIT_MODE!r})")
     if len(res_arr):
         print(f"Delay residual: median={np.median(res_arr):+.2f} d  "
               f"std={np.std(res_arr):.2f} d  "
               f"|res|<2d: {np.mean(np.abs(res_arr)<2)*100:.0f}%")
+    if len(time_arr):
+        print(f"Per-system fit time: median={np.median(time_arr):.1f}s  "
+              f"mean={np.mean(time_arr):.1f}s  max={np.max(time_arr):.1f}s")
     print(f"Saved -> {OUTPUT_FILE}")
     if fail_counts:
         print(f"\nFailure summary:")

@@ -10,16 +10,21 @@ New import:  from roman_td.sntd_wrapper import measure_one, register_roman_bands
 Pipeline
 --------
 1. Extract noisy multi-band light curves from a slsim lens object
-   (calls lenstronomy ray-tracing internally — this is the main cost here)
+   (calls lenstronomy ray-tracing internally). Measured cost: sub-second
+   per system in practice — NOT the bottleneck; see fit_time_s below.
 2. Build a SNTD MISN (Multi-Image SuperNova) object
 3. Run SNTD fit_data(method="parallel"): fits each image independently with
-   SALT2-extended using emcee MCMC, then reports t0 offsets as time delays
+   SALT2-extended using nestle nested sampling (not emcee/MCMC — verified
+   against the installed sntd package, which imports nestle and has no
+   emcee usage outside its unused old_fitting.py), then reports t0 offsets
+   as time delays. This nested-sampling step is the actual dominant cost,
+   from tens of seconds to multiple hours per system depending on bounds
+   width and sampling budget (see measure_one's t0_window/npoints/maxcall).
 
 Speed vs accuracy trade-off vs BayeSN
 --------------------------------------
-SNTD+SALT2 uses emcee (MCMC): faster (~1-5 min/system), but posterior
-uncertainties are less reliable and SALT2's color parameter c conflates
-intrinsic SN color with host dust, which biases magnification estimates.
+SALT2's color parameter c conflates intrinsic SN color with host dust,
+which biases magnification estimates (though less so for delay measurement).
 See bayesn_wrapper.py for the more accurate but slower alternative.
 """
 
@@ -33,6 +38,40 @@ _np.bool = bool
 import sncosmo
 import sntd
 import numpy as np
+
+# nestle weights underflow to 0.0 in float64 when the posterior is much
+# narrower than the prior (high-SNR data). exp(logwt - logz) rounds to zero,
+# which breaks both nestle.mean_and_cov and SNTD's weighted_quantile call
+# (both divide by the weight sum). Fix at the source: after nestle.sample
+# returns, recompute weights in log-space to recover the true relative values.
+def _patch_nestle_weights():
+    try:
+        import nestle
+        _orig_sample = nestle.sample
+
+        def _robust_sample(*args, **kwargs):
+            res = _orig_sample(*args, **kwargs)
+            # Always renormalize in log-space. The default weights are
+            # exp(logwt - logz), which underflows to 0 when the posterior
+            # is narrow (high-SNR data). SNTD multiplies two images' weight
+            # arrays together for the delay estimate, so even subnormal
+            # weights (~1e-318) produce a product (~1e-636) below float64
+            # minimum (~5e-324), giving zero and then NaN in weighted_quantile.
+            # Log-space renormalization keeps weights in a normal float range.
+            logwt = res.logvol + res.logl
+            finite = np.isfinite(logwt)
+            if finite.any():
+                lw = np.full_like(logwt, -np.inf)
+                lw[finite] = logwt[finite] - logwt[finite].max()
+                w = np.exp(lw)
+                res.weights[:] = w / w.sum()
+            return res
+
+        nestle.sample = _robust_sample
+    except ImportError:
+        pass
+
+_patch_nestle_weights()
 from astropy.table import Table
 from collections import OrderedDict
 import time
@@ -62,6 +101,14 @@ DEFAULT_DEPTH_5SIG = {
 # ZP=25.0 matches the SNANA/sncosmo AB flux convention.
 # Must be consistent with whatever ZP is used to generate the photometry.
 ZP = 25.0
+
+# Convenience bundles for measure_one()'s independent t0_window/npoints/maxcall
+# knobs. Prefer calling measure_one() with the raw knobs directly when trying
+# to isolate which one actually matters — these presets are for normal runs.
+FIT_PRESETS = {
+    "robust": dict(t0_window=None, npoints=None, maxcall=None),
+    "fast": dict(t0_window=30.0, npoints=100, maxcall=8000),
+}
 
 
 def register_roman_bands(speclite_filters=None):
@@ -173,6 +220,10 @@ def measure_one(
     lens_index=0,
     max_delay_days=150.0,
     min_image_snr=10.0,
+    t0_window=None,
+    t0_pad_days=50.0,
+    npoints=None,
+    maxcall=None,
 ):
     """Measure time delays for one lensed SN system using SNTD + SALT2-extended.
 
@@ -181,10 +232,31 @@ def measure_one(
     - "salt3" has improved calibration but a narrower trained wavelength range
     - "salt2-extended" covers ~3000–11000 Å rest-frame, spanning all Roman filters
 
+    Fit knobs (independent — vary one at a time to see which one actually
+    drives speed/accuracy, rather than only comparing bundled presets; see
+    FIT_PRESETS below for the "robust"/"fast" convenience bundles):
+    - t0_window: None (default) -> t0 bounds span every kept image's own
+      significant-SNR detection window (not ground truth), padded by
+      t0_pad_days on each side. t0_guess is pinned to 0 for every image so
+      SNTD's internal guess_amplitude/trial_fit re-centering can't shift this
+      already-wide window again. Most robust against a bad initial guess.
+      A float -> bounds are a small window (+/- t0_window) around 0, and
+      SNTD's trial_fit=True does a quick per-image sncosmo.fit_lc (t0 +
+      amplitude only, top-SNR bands) to re-center that window on each image's
+      own data. Can fail if the quick pre-fit locks onto the wrong peak
+      (aliasing, low S/N) since the sampler can't then see outside the
+      narrow window.
+    - npoints: nestle live points. None -> SNTD's own internal default
+      (100-1000 depending on call site). Fewer live points is faster but a
+      sparser ellipsoid is less likely to land inside a very narrow,
+      high-SNR posterior peak within budget.
+    - maxcall: hard cap on likelihood evaluations. None -> unbounded.
+
     Returns
     -------
     dict with keys: status, z_lens, z_source, n_images,
                     true_delays, fit_delays, fit_delay_errors, diagnostics
+                    (diagnostics includes fit_time_s on success)
     """
     if depth_5sig is None:
         depth_5sig = DEFAULT_DEPTH_5SIG
@@ -272,7 +344,7 @@ def measure_one(
     print(f"    true delays: {true_delays}")
 
     # Skip systems with very large delays: the SN fades before the second image
-    # rises, so the two light curves don't overlap and SNTD's MCMC has nothing
+    # rises, so the two light curves don't overlap and the sampler has nothing
     # to cross-correlate. These are also rare extreme-mass lens configurations
     # that are not the primary Roman science target.
     max_delay = max(true_delays.values())
@@ -281,17 +353,6 @@ def measure_one(
         print(f"    SKIP: {result['status']}  ({time.time()-t_total_start:.1f}s total)")
         return result
 
-    # Require all kept images to meet the SNR threshold. An image just above
-    # the detection floor (SNR~5-9) contributes a near-flat likelihood term
-    # that slows MCMC convergence without adding meaningful delay information.
-    low_snr_images = [n for n, s in image_snr.items() if n in image_tables and s < min_image_snr]
-    if low_snr_images:
-        snr_str = ", ".join(f"{n}={image_snr[n]:.1f}" for n in low_snr_images)
-        result["status"] = f"image_snr_too_low: {snr_str} < {min_image_snr:.0f}"
-        print(f"    SKIP: {result['status']}  ({time.time()-t_total_start:.1f}s total)")
-        return result
-
-    t0 = time.time()
     try:
         misn = sntd.MISN(telescopename="Roman", object_name="slsim_lens")
         misn.zl = z_lens
@@ -303,29 +364,67 @@ def measure_one(
             img_lc.zpsys = "ab"
             misn.add_image_lc(img_lc, key=name)
 
-        # Bounds must span ALL image peaks, not just ±100 around the mean.
-        # For large delays (e.g. 339 days) a symmetric ±100-day window around
-        # the mean misses both images and the MCMC explores empty likelihood space.
-        t0_lo = float(np.min(arrival_times)) - 50
-        t0_hi = float(np.max(arrival_times)) + 50
-        print(f"    t0 bounds: [{t0_lo:.1f}, {t0_hi:.1f}]  delay span: {t0_hi - t0_lo - 100:.1f} d")
-        fit_result = sntd.fit_data(
-            misn,
+        fit_kwargs = dict(
             snType="Ia",
             models=model_name,
             bands=bands_used,
             params=["t0", "x0", "x1", "c"],
-            bounds={
-                "t0": (t0_lo, t0_hi),
-                "x1": (-3, 3),
-                "c": (-0.3, 0.3),
-            },
+            # SNTD never reads misn.zs/misn.zl automatically (verified: zero
+            # references to either in sntd/fitting.py) — without this, the
+            # model fits at its default z=0 regardless of the true source
+            # redshift, which for this population ranges ~0.9-3.8 and causes
+            # catastrophic template mismatch (degenerate posteriors, fits
+            # that never converge).
+            constants={"z": z_source},
             method="parallel",
-            nMul=1,       # 1 MCMC chain per image; increase for single-system runs
             verbose=False,
             guess_amplitude=True,
         )
-        print(f"    SNTD fit: {time.time()-t0:.1f}s")
+
+        if t0_window is None:
+            # Bounds must span ALL image peaks, not just a window around one
+            # guess — for large delays (e.g. 339 days) a narrow window centered
+            # on a single estimate misses the other image(s) entirely and the
+            # sampler explores empty likelihood space. Built from each kept
+            # image's own significant-SNR detection times (not ground-truth
+            # arrival times, which real data won't have). t0_guess=0 for every
+            # image stops SNTD's internal guess_amplitude/trial_fit machinery
+            # from re-centering this already-wide window around a second guess.
+            detected_times = np.concatenate([
+                np.asarray(tbl["time"])[np.abs(tbl["flux"] / tbl["fluxerr"]) >= min_image_snr]
+                for tbl in image_tables.values()
+            ])
+            t0_lo = float(detected_times.min()) - t0_pad_days
+            t0_hi = float(detected_times.max()) + t0_pad_days
+            fit_kwargs.update(
+                bounds={"t0": (t0_lo, t0_hi), "x1": (-3, 3), "c": (-0.3, 0.3)},
+                t0_guess={name: 0.0 for name in image_tables},
+                trial_fit=False,
+            )
+        else:
+            # Small window re-centered per image by a quick sncosmo.fit_lc
+            # (t0 + amplitude only, top-SNR bands) instead of full nested
+            # sampling exploration.
+            fit_kwargs.update(
+                bounds={"t0": (-t0_window, t0_window), "x1": (-3, 3), "c": (-0.3, 0.3)},
+                trial_fit=True,
+            )
+
+        if npoints is not None:
+            fit_kwargs["npoints"] = npoints
+        if maxcall is not None:
+            fit_kwargs["maxcall"] = maxcall
+
+        print(f"    t0_window={t0_window}  npoints={npoints}  maxcall={maxcall}  "
+              f"t0 bounds: {fit_kwargs['bounds']['t0']}")
+        t_fit_start = time.time()
+        fit_result = sntd.fit_data(misn, **fit_kwargs)
+        fit_time_s = time.time() - t_fit_start
+        print(f"    SNTD fit: {fit_time_s:.1f}s")
+        result["diagnostics"]["fit_time_s"] = fit_time_s
+        result["diagnostics"]["t0_window"] = t0_window
+        result["diagnostics"]["npoints"] = npoints
+        result["diagnostics"]["maxcall"] = maxcall
 
         fit_delays = {}
         fit_delay_errors = {}
