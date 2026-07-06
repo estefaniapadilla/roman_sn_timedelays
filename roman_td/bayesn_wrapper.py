@@ -211,6 +211,10 @@ def fit_system(
     npoints_color: int,
     ncpu_fit: int,
     delay_window: float = 40.0,
+    fit_mu: bool = True,
+    maxcall: Optional[int] = None,
+    dt_hints: Optional[Dict[str, Tuple[float, float]]] = None,
+    hint_ref: Optional[str] = None,
 ) -> Tuple[Any, Any, Dict[str, float], str]:
     """Run the BayeSN two-stage series → color fit on a MISN object.
 
@@ -224,6 +228,25 @@ def fit_system(
         Half-width of the search window for each time delay offset, in days.
         Initialized from peak-flux offsets ± delay_window. 40 days is
         generous for galaxy-scale lenses (typical delays are 1-100 days).
+    fit_mu : bool
+        Sample per-image magnification ratios (mu_<img>) in the series fit.
+        False reproduces the pre-mu behavior (delays only).
+    maxcall : int or None
+        Hard cap on likelihood evaluations per stage. None = unbounded —
+        DANGEROUS: SNTD's 0.1-day phase rounding quantizes the likelihood
+        into plateaus, on which nestle can fail to terminate (observed:
+        >1.4M calls / 13 h on a single system whose likelihood costs 33 ms
+        per call). 50_000 caps a stage at ~30 min worst-case and is near
+        convergence for these 5-7 parameter fits.
+    dt_hints : dict img -> (dt_est, dt_err), optional
+        Stage-1 GP cross-correlation priming. For a hinted image the delay
+        bounds become dt_est ± max(4*dt_err, 10 d) instead of peak-offset
+        ± delay_window, and the t0 window tightens — the volume reduction
+        that lets the sampler converge inside maxcall.
+    hint_ref : str, optional
+        Image the GP delays are referenced to. Hints are ignored if this
+        differs from the reference image chosen here (both use "brightest",
+        so they normally agree — this is a misapplication guard).
 
     Returns
     -------
@@ -243,16 +266,52 @@ def fit_system(
     amp_guess, amp_bounds = estimate_amplitude_bounds(tab, model, ref)
     t0_ref = peaks[ref]
 
-    series_vparams = ["t0", "theta", "hostebv", "amplitude"] + [f"dt_{img}" for img in others]
+    # mu_<img> is the per-image flux (magnification) ratio relative to ref:
+    # nest_series_lc divides each image's flux by its mu in the likelihood.
+    # Model params must come first and dt_*/mu_* last — nest_series_lc slices
+    # vparam_names positionally to separate them.
+    series_vparams = (["t0", "theta", "hostebv", "amplitude"]
+                      + [f"dt_{img}" for img in others]
+                      + ([f"mu_{img}" for img in others] if fit_mu else []))
     series_bounds: Dict[str, Any] = {
         "t0": (t0_ref - 1.5 * delay_window, t0_ref + 1.5 * delay_window),
         "theta": (-3.0, 3.0),
         "hostebv": (0.0, 1.0),
         "amplitude": amp_bounds,
     }
+    # GP hints only apply if they are referenced to the same image this fit
+    # uses as reference; otherwise the offsets would be misapplied.
+    hints_ok = dt_hints is not None and (hint_ref is None or hint_ref == ref)
+
+    any_hint = False
     for img in others:
-        off = peaks[img] - peaks[ref]
-        series_bounds[f"dt_{img}"] = (off - delay_window, off + delay_window)
+        hint = dt_hints.get(img) if hints_ok else None
+        if hint is not None and np.isfinite(hint[0]):
+            est, err = float(hint[0]), float(hint[1])
+            half = max(4.0 * err, 10.0) if np.isfinite(err) else 10.0
+            series_bounds[f"dt_{img}"] = (est - half, est + half)
+            any_hint = True
+        else:
+            off = peaks[img] - peaks[ref]
+            series_bounds[f"dt_{img}"] = (off - delay_window, off + delay_window)
+        if fit_mu:
+            # Peak-flux ratio is a good first estimate of the mu ratio; a
+            # factor-5 window around it is generous (ref is the brightest
+            # image, so the true ratio is <= ~1 up to noise).
+            ratio = fluxes[img] / fluxes[ref]
+            series_bounds[f"mu_{img}"] = (ratio / 5.0, min(ratio * 5.0, 2.5))
+
+    if any_hint:
+        # A trustworthy delay hint implies the ref-image peak time is also
+        # trustworthy: shrink t0 from ±1.5*delay_window to ±20 d around it.
+        series_bounds["t0"] = (t0_ref - 20.0, t0_ref + 20.0)
+
+    # Log-uniform prior on amplitude: its bounds span a factor ~90,000, and
+    # a linear-uniform prior puts >99% of the search volume more than 2x from
+    # the truth — the main cause of the ~2% sampler acceptance rate. Equal
+    # weight per decade makes the plausible region ~10% of the prior instead.
+    a_lo, a_hi = amp_bounds
+    ppfs = {"amplitude": lambda u: a_lo * (a_hi / a_lo) ** np.asarray(u)}
 
     # ----- SERIES FIT -----
     t_start = time.time()
@@ -260,9 +319,14 @@ def fit_system(
         misn["table"], model, nimage, series_vparams, series_bounds,
         ref=ref, use_MLE=False, npoints=npoints_series,
         priors={"theta": lambda x: float(scipy.stats.norm.pdf(x, 0, 1))},
-        modelcov=False,
+        ppfs=ppfs, modelcov=False, maxcall=maxcall,
     )
     timing["series_sec"] = time.time() - t_start
+    timing["series_ncall"] = int(getattr(res_s, "ncall", -1))
+    timing["series_niter"] = int(getattr(res_s, "niter", -1))
+    # A fit that used its whole call budget was truncated, not converged —
+    # its output must be flagged, never silently trusted.
+    timing["series_hit_cap"] = bool(maxcall and timing["series_ncall"] >= maxcall)
 
     vp_s = list(res_s.vparam_names)
     theta_idx = vp_s.index("theta")
@@ -318,12 +382,24 @@ def fit_system(
     theta_prior = scipy.stats.norm(float(theta_med), float(theta_std)).pdf
 
     t_start = time.time()
-    params_c, res_c, model = sntd.fitting.nest_color_lc(
-        misn.color.table, model, nimage, color_pairs, color_vparams, color_bounds,
-        ref=ref, use_MLE=False, npoints=npoints_color,
-        priors={"theta": theta_prior}, modelcov=False,
-    )
+    try:
+        params_c, res_c, model = sntd.fitting.nest_color_lc(
+            misn.color.table, model, nimage, color_pairs, color_vparams, color_bounds,
+            ref=ref, use_MLE=False, npoints=npoints_color,
+            priors={"theta": theta_prior}, modelcov=False, maxcall=maxcall,
+        )
+    except Exception as e:
+        # Known failure mode: likelihood plateaus (SNTD's 0.1-day phase
+        # rounding) can make nestle's weights degenerate -> ZeroDivisionError.
+        # Fall back to the series delays rather than failing the system.
+        timing["color_sec"] = time.time() - t_start
+        timing["color_error"] = f"{type(e).__name__}: {e}"
+        timing["total_sec"] = timing["series_sec"] + timing["color_sec"]
+        return (params_s, res_s), None, timing, ref
     timing["color_sec"] = time.time() - t_start
+    timing["color_ncall"] = int(getattr(res_c, "ncall", -1))
+    timing["color_niter"] = int(getattr(res_c, "niter", -1))
+    timing["color_hit_cap"] = bool(maxcall and timing["color_ncall"] >= maxcall)
     timing["total_sec"] = timing["series_sec"] + timing["color_sec"]
 
     return (params_s, res_s), (params_c, res_c), timing, ref
@@ -349,6 +425,11 @@ def result_to_rows(res: Dict[str, Any]) -> List[Dict[str, Any]]:
     if ref_fit is None or ref_fit not in true0:
         ref_fit = images[0]
 
+    true_mu = res.get("true_mu", {})
+    fit_mu = res.get("fit_mu_ratio", {})
+    fit_mu_err = res.get("fit_mu_ratio_errors", {})
+    mu_ref_true = float(true_mu.get(ref_fit, np.nan) or np.nan)
+
     for img in images:
         if img == ref_fit:
             continue
@@ -357,6 +438,12 @@ def result_to_rows(res: Dict[str, Any]) -> List[Dict[str, Any]]:
         td_err = res["fit_delay_errors"].get(img, [np.nan, np.nan])
         if np.ndim(td_err) == 0:
             td_err = [td_err, td_err]
+        mu_true_ratio = (float(true_mu.get(img, np.nan)) / mu_ref_true
+                         if mu_ref_true and np.isfinite(mu_ref_true) else np.nan)
+        mu_fit_ratio = float(fit_mu.get(img, np.nan))
+        mu_err = fit_mu_err.get(img, [np.nan, np.nan])
+        if np.ndim(mu_err) == 0:
+            mu_err = [mu_err, mu_err]
         rows.append({
             "lens_index": res["lens_index"], "image": img,
             "z_lens": res["z_lens"], "z_source": res["z_source"],
@@ -364,6 +451,12 @@ def result_to_rows(res: Dict[str, Any]) -> List[Dict[str, Any]]:
             "true_delay": td_true, "fit_delay": td_fit,
             "fit_err_lo": float(td_err[0]), "fit_err_hi": float(td_err[-1]),
             "residual": td_fit - td_true,
+            "true_mu_ratio": mu_true_ratio, "fit_mu_ratio": mu_fit_ratio,
+            "mu_err_lo": float(mu_err[0]), "mu_err_hi": float(mu_err[-1]),
+            "mu_residual": mu_fit_ratio - mu_true_ratio,
+            # False = a sampler stage hit maxcall: truncated, not converged —
+            # exclude from accuracy statistics.
+            "converged": bool(res.get("converged", True)),
         })
     return rows
 

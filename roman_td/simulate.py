@@ -60,6 +60,32 @@ except Exception:
     pass
 
 
+def to_canonical(image_tables) -> at.Table:
+    """Convert sntd_wrapper-style per-image tables to the canonical schema.
+
+    sntd_wrapper.extract_light_curves() returns an OrderedDict of per-image
+    Tables with columns (time, band, flux, fluxerr, zp, zpsys); this module's
+    simulate_photometry() returns one combined Table with columns
+    (mjd, filter, flux, fluxerr, zp, zpsys, image). The combined form is the
+    canonical schema every downstream stage (GP cross-correlation, tokenizer)
+    consumes — see documents/pipeline_architecture.md §6.1.
+    """
+    parts = []
+    for name, tbl in image_tables.items():
+        part = at.Table()
+        part["mjd"] = np.asarray(tbl["time"], dtype=float)
+        part["filter"] = [str(b) for b in tbl["band"]]
+        part["flux"] = np.asarray(tbl["flux"], dtype=float)
+        part["fluxerr"] = np.asarray(tbl["fluxerr"], dtype=float)
+        part["zp"] = np.asarray(tbl["zp"], dtype=float)
+        part["zpsys"] = [str(z) for z in tbl["zpsys"]]
+        part["image"] = [str(name)] * len(tbl)
+        parts.append(part)
+    tab = at.vstack(parts)
+    tab.sort(["image", "mjd", "filter"])
+    return tab
+
+
 def lens_truth(lens) -> Optional[Dict[str, Any]]:
     """Extract ground-truth redshifts, time delays, and magnifications from slsim.
 

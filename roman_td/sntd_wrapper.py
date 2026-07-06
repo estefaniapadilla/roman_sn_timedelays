@@ -108,6 +108,10 @@ ZP = 25.0
 FIT_PRESETS = {
     "robust": dict(t0_window=None, npoints=None, maxcall=None),
     "fast": dict(t0_window=30.0, npoints=100, maxcall=8000),
+    # GP-primed: run the Stage-1 cross-correlator on the extracted light
+    # curves; if every image is quality "good", sample fast-mode budgets
+    # inside narrow GP-centered windows, else fall back to full robust.
+    "gp": dict(t0_window=None, npoints=100, maxcall=8000, gp_priming=True),
 }
 
 
@@ -224,6 +228,7 @@ def measure_one(
     t0_pad_days=50.0,
     npoints=None,
     maxcall=None,
+    gp_priming=False,
 ):
     """Measure time delays for one lensed SN system using SNTD + SALT2-extended.
 
@@ -251,6 +256,14 @@ def measure_one(
       sparser ellipsoid is less likely to land inside a very narrow,
       high-SNR posterior peak within budget.
     - maxcall: hard cap on likelihood evaluations. None -> unbounded.
+    - gp_priming: True -> run the Stage-1 GP cross-correlator on the
+      extracted light curves and apply the routing rule:
+        every image quality "good" -> per-image t0 windows centered on the
+          GP peak times, width max(4*sigma, 10)+5 d, with npoints/maxcall
+          as given ("gp_primed_fast");
+        otherwise -> wide data-driven bounds, uncapped sampling
+          ("gp_fallback_robust").
+      The GP result and effective mode are recorded in diagnostics.
 
     Returns
     -------
@@ -268,7 +281,8 @@ def measure_one(
     result = {
         "status": "fail", "z_lens": z_lens, "z_source": z_source,
         "n_images": 0, "true_delays": {}, "fit_delays": {},
-        "fit_delay_errors": {}, "diagnostics": {},
+        "fit_delay_errors": {}, "true_mu_ratio": {}, "fit_mu_ratio": {},
+        "fit_mu_ratio_errors": {}, "diagnostics": {},
     }
 
     t_total_start = time.time()
@@ -282,6 +296,14 @@ def measure_one(
         result["status"] = f"no_arrival_times: {e}"
         return result
     print(f"    arrival times: {time.time()-t0:.1f}s  ({len(arrival_times)} images)")
+
+    # True macro magnifications, same slsim image ordering as arrival_times.
+    # abs() because slsim returns signed magnifications (parity).
+    try:
+        true_mu_all = np.abs(np.asarray(
+            lens.point_source_magnification()[0], dtype=float))
+    except Exception:
+        true_mu_all = None
 
     n_images = len(arrival_times)
     result["n_images"] = n_images
@@ -343,6 +365,18 @@ def measure_one(
     result["true_delays"] = true_delays
     print(f"    true delays: {true_delays}")
 
+    # True magnification ratio mu_i / mu_ref, referenced to the first KEPT
+    # image (image names encode the original slsim index, so this stays
+    # correct after low-SNR images are dropped).
+    if true_mu_all is not None:
+        kept_idx = [int(name.rsplit("_", 1)[1]) - 1 for name in image_tables]
+        if max(kept_idx) < len(true_mu_all) and true_mu_all[kept_idx[0]] > 0:
+            mu_ref = true_mu_all[kept_idx[0]]
+            result["true_mu_ratio"] = {
+                name: float(true_mu_all[j] / mu_ref)
+                for name, j in zip(image_tables, kept_idx)
+            }
+
     # Skip systems with very large delays: the SN fades before the second image
     # rises, so the two light curves don't overlap and the sampler has nothing
     # to cross-correlate. These are also rare extreme-mass lens configurations
@@ -352,6 +386,53 @@ def measure_one(
         result["status"] = f"delay_too_large: {max_delay:.1f} d > {max_delay_days:.0f} d limit"
         print(f"    SKIP: {result['status']}  ({time.time()-t_total_start:.1f}s total)")
         return result
+
+    # ── Stage-1 GP priming (routing rule from the architecture doc §2.6) ──
+    primed_t0_guess = None   # dict image -> expected absolute t0 (MJD)
+    primed_half = None       # window half-width around each guess, days
+    if gp_priming:
+        t_gp = time.time()
+        try:
+            from roman_td.simulate import to_canonical
+            from roman_td.crosscorr import gp_cross_correlate
+            gp = gp_cross_correlate(to_canonical(image_tables),
+                                    list(image_tables), rng=rng)
+        except Exception as e:
+            gp = None
+            result["diagnostics"]["gp_error"] = str(e)
+        result["diagnostics"]["gp_time_s"] = time.time() - t_gp
+
+        if gp is not None:
+            gp_ref = gp["ref_image"]
+            result["diagnostics"]["gp"] = {
+                "ref_image": gp_ref, "t_peak_ref": gp["t_peak_ref"],
+                **{img: {"dt_gp": e["dt_gp"], "dt_gp_err": e["dt_gp_err"],
+                         "quality": e["quality"], "flux_ratio": e["flux_ratio"]}
+                   for img, e in gp["per_image"].items()},
+            }
+            all_good = (np.isfinite(gp["t_peak_ref"])
+                        and gp["per_image"]
+                        and all(e["quality"] == "good"
+                                for e in gp["per_image"].values()))
+            if all_good:
+                primed_t0_guess = {gp_ref: float(gp["t_peak_ref"])}
+                half = 10.0
+                for img, e in gp["per_image"].items():
+                    primed_t0_guess[img] = float(gp["t_peak_ref"] + e["dt_gp"])
+                    if np.isfinite(e["dt_gp_err"]):
+                        half = max(half, 4.0 * float(e["dt_gp_err"]))
+                # +5 d margin: the GP peak is the observed-band maximum,
+                # SALT's t0 is rest-B maximum — they differ by a few days.
+                primed_half = half + 5.0
+
+        if primed_t0_guess is None:
+            # Routing fallback: GP not trustworthy -> full robust settings.
+            npoints, maxcall = None, None
+        mode_effective = ("gp_primed_fast" if primed_t0_guess is not None
+                          else "gp_fallback_robust")
+        result["diagnostics"]["mode_effective"] = mode_effective
+        print(f"    GP routing: {mode_effective}"
+              + (f"  window=±{primed_half:.1f}d" if primed_half else ""))
 
     try:
         misn = sntd.MISN(telescopename="Roman", object_name="slsim_lens")
@@ -381,7 +462,18 @@ def measure_one(
             guess_amplitude=True,
         )
 
-        if t0_window is None:
+        if primed_t0_guess is not None:
+            # GP-primed: narrow per-image windows centered on the GP peak
+            # times (SNTD applies bounds relative to each image's t0_guess).
+            # trial_fit=False — the GP replaces the risky per-image pre-fit.
+            fit_kwargs.update(
+                bounds={"t0": (-primed_half, primed_half),
+                        "x1": (-3, 3), "c": (-0.3, 0.3)},
+                t0_guess={name: primed_t0_guess.get(name, 0.0)
+                          for name in image_tables},
+                trial_fit=False,
+            )
+        elif t0_window is None:
             # Bounds must span ALL image peaks, not just a window around one
             # guess — for large delays (e.g. 339 days) a narrow window centered
             # on a single estimate misses the other image(s) entirely and the
@@ -457,10 +549,63 @@ def measure_one(
                 else:
                     fit_delay_errors[name] = [np.nan, np.nan]
 
+        # Magnification ratio mu_i / mu_ref from the fit. SNTD's parallel
+        # output exposes this directly (computed from the per-image fitted
+        # x0); fall back to the fitted models' x0 ratio if the attribute is
+        # missing or NaN in this SNTD version. NOTE: this is the TOTAL
+        # magnification ratio (macro x micro) — with no microlensing in the
+        # simulation it should equal true_mu_ratio.
+        fit_mu = {}
+        fit_mu_err = {}
+        if par is not None:
+            mags = getattr(par, "magnifications", None)
+            mag_err = getattr(par, "magnification_errors", None)
+            fit_mu[image_names[0]] = 1.0
+            fit_mu_err[image_names[0]] = [0.0, 0.0]
+
+            for name in image_names[1:]:
+                if isinstance(mags, dict):
+                    fit_mu[name] = float(mags.get(name, np.nan))
+                elif mags is not None:
+                    idx = image_names.index(name) - 1
+                    fit_mu[name] = float(mags[idx]) if idx < len(mags) else np.nan
+                else:
+                    fit_mu[name] = np.nan
+
+                err = None
+                if isinstance(mag_err, dict):
+                    err = mag_err.get(name)
+                elif mag_err is not None:
+                    idx = image_names.index(name) - 1
+                    err = mag_err[idx] if idx < len(mag_err) else None
+                if err is None:
+                    fit_mu_err[name] = [np.nan, np.nan]
+                elif hasattr(err, "__len__"):
+                    fit_mu_err[name] = [float(err[0]), float(err[1])]
+                else:
+                    fit_mu_err[name] = [float(err), float(err)]
+
+            if any(not np.isfinite(fit_mu[n]) for n in image_names[1:]):
+                x0s = {}
+                for name in image_names:
+                    try:
+                        x0s[name] = float(fit_result.images[name].fits.model.get("x0"))
+                    except Exception:
+                        x0s[name] = np.nan
+                x0_ref = x0s[image_names[0]]
+                if np.isfinite(x0_ref) and x0_ref > 0:
+                    for name in image_names[1:]:
+                        if not np.isfinite(fit_mu[name]):
+                            fit_mu[name] = x0s[name] / x0_ref
+
         result["fit_delays"] = fit_delays
         result["fit_delay_errors"] = fit_delay_errors
+        result["fit_mu_ratio"] = fit_mu
+        result["fit_mu_ratio_errors"] = fit_mu_err
         result["status"] = "ok"
-        print(f"    OK: fit_delays={fit_delays}  ({time.time()-t_total_start:.1f}s total)")
+        print(f"    OK: fit_delays={fit_delays}  fit_mu_ratio="
+              f"{{{', '.join(f'{k}: {v:.2f}' for k, v in fit_mu.items())}}}  "
+              f"({time.time()-t_total_start:.1f}s total)")
 
     except Exception as e:
         import traceback

@@ -49,7 +49,7 @@ N_SYSTEMS = 1000    # stop after this many successful fits (0 = no limit, run th
 SEED = 42
 N_JOBS = 32         # use all cores; set to -1 to auto-detect
 SAVE_EVERY = 10
-FIT_MODE = "fast"  # "robust" (wide, data-driven bounds, slow) or "fast" (narrow, trial_fit-recentered, capped)
+FIT_MODE = "gp"  # "robust" (wide bounds, slow) | "fast" (trial_fit-recentered, capped) | "gp" (GP-primed windows, robust fallback)
 
 OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, f"delay_benchmark_{FIT_MODE}.ecsv")
@@ -112,6 +112,9 @@ def main():
                 continue
             td_fit = res["fit_delays"].get(img, np.nan)
             td_err = res["fit_delay_errors"].get(img, [np.nan, np.nan])
+            mu_true = res.get("true_mu_ratio", {}).get(img, np.nan)
+            mu_fit = res.get("fit_mu_ratio", {}).get(img, np.nan)
+            mu_err = res.get("fit_mu_ratio_errors", {}).get(img, [np.nan, np.nan])
             rows.append({
                 "lens_index": res["lens_index"], "image": img,
                 "z_lens": res["z_lens"], "z_source": res["z_source"],
@@ -120,7 +123,14 @@ def main():
                 "fit_err_lo": td_err[0] if np.ndim(td_err) else td_err,
                 "fit_err_hi": td_err[1] if np.ndim(td_err) else td_err,
                 "residual": td_fit - td_true,
+                "true_mu_ratio": mu_true, "fit_mu_ratio": mu_fit,
+                "mu_err_lo": mu_err[0] if np.ndim(mu_err) else mu_err,
+                "mu_err_hi": mu_err[1] if np.ndim(mu_err) else mu_err,
+                "mu_residual": mu_fit - mu_true,
                 "fit_mode": FIT_MODE, "fit_time_s": fit_time_s,
+                # gp mode only: which route ran + GP overhead (else blank/nan)
+                "mode_effective": res["diagnostics"].get("mode_effective", ""),
+                "gp_time_s": res["diagnostics"].get("gp_time_s", np.nan),
             })
         n_done += 1
 
@@ -146,6 +156,10 @@ def main():
         print(f"Delay residual: median={np.median(res_arr):+.2f} d  "
               f"std={np.std(res_arr):.2f} d  "
               f"|res|<2d: {np.mean(np.abs(res_arr)<2)*100:.0f}%")
+    mu_res_arr = np.array([r["mu_residual"] for r in rows if np.isfinite(r["mu_residual"])])
+    if len(mu_res_arr):
+        print(f"Mu-ratio residual ({len(mu_res_arr)} images): "
+              f"median={np.median(mu_res_arr):+.3f}  std={np.std(mu_res_arr):.3f}")
     if len(time_arr):
         print(f"Per-system fit time: median={np.median(time_arr):.1f}s  "
               f"mean={np.mean(time_arr):.1f}s  max={np.max(time_arr):.1f}s")

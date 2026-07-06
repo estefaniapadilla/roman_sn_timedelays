@@ -1,158 +1,183 @@
 """
 compare_fit_modes.py
 =====================
-Runs the same fixed subset of lens systems through several measure_one()
-knob variants with identical noise realizations, so residual accuracy and
-per-system wall-clock time can be compared head-to-head instead of across
-uncontrolled runs.
+Head-to-head comparison of the three delay-measurement methods on the SAME
+lens systems (inner join on lens_index + image):
 
-VARIANTS defaults to the "robust"/"fast" convenience presets, but each entry
-is just a kwargs dict for measure_one()'s independent t0_window/npoints/
-maxcall knobs — add more entries here to isolate which knob actually drives
-a speed or accuracy difference (e.g. narrow window with an uncapped sampler,
-or the wide window with capped npoints) rather than only ever comparing the
-two bundled presets.
+  GP cross-correlation  scripts/gp_benchmark.ecsv             (wall_time_s)
+  SALT fast             scripts/delay_benchmark_fast.ecsv     (fit_time_s)
+  SALT robust           scripts/delay_benchmark_robust.ecsv   (fit_time_s)
 
-Subset is drawn from an existing delay_benchmark_*.ecsv (spanning small to
-large true delays, including the widest one available) so every system is
-already known to pass the SNR/delay cuts and fit successfully under the
-original approach.
+All three used identical simulations (same per-lens seed), so differences
+are attributable to the method alone. "GP (good)" is the GP restricted to
+its own quality == "good" flag — the subset the pipeline would trust for
+priming Stage 3.
 
-Usage: python compare_fit_modes.py
+Outputs: figures/benchmark_comparison.png + a stats table on stdout.
+
+(The previous version of this script re-ran measure_one() variants on a
+lens subset; it is preserved in git history if needed.)
+
+Usage: python scripts/compare_fit_modes.py
 """
 
-import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-import pickle
 import numpy as np
-from astropy.table import Table, vstack
-from joblib import Parallel, delayed
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from astropy.table import Table
 
-from roman_td.sntd_wrapper import measure_one, register_roman_bands, DEFAULT_DEPTH_5SIG, FIT_PRESETS
-from run_sntd_population import PICKLE, BANDS, CADENCE, SEED
+HERE = os.path.dirname(os.path.abspath(__file__))
+FIGDIR = os.path.join(os.path.dirname(HERE), "figures")
+os.makedirs(FIGDIR, exist_ok=True)
 
-# Reference table to draw a representative lens_index subset from (must exist —
-# run_sntd_population.py or a prior compare run writes one of these).
-REFERENCE_ECSV = os.path.join(os.path.dirname(__file__), "delay_benchmark_robust.ecsv")
-if not os.path.exists(REFERENCE_ECSV):
-    REFERENCE_ECSV = os.path.join(os.path.dirname(__file__), "delay_benchmark.ecsv")
-
-N_COMPARE = 12       # number of lens systems to test, spanning the delay range
-N_JOBS = 6           # modest — avoid contention with any full population run
-VARIANTS = dict(FIT_PRESETS)  # {label: measure_one kwargs} — extend for isolated knob tests
-
-OUTPUT_FILE = os.path.join(os.path.dirname(__file__), "fit_mode_comparison.ecsv")
+# Fixed color per method (validated categorical palette; never reassigned)
+COLORS = {"GP": "#2a78d6", "fast": "#eda100", "robust": "#1baf7a"}
+TEXT, MUTED = "#1a1a19", "#6b6a60"
 
 
-def select_lens_indices(n):
-    ref = Table.read(REFERENCE_ECSV)
-    by_lens = {}
-    for row in ref:
-        by_lens.setdefault(int(row["lens_index"]), float(row["true_delay"]))
-    lens_ids = list(by_lens.keys())
-    lens_ids.sort(key=lambda i: by_lens[i])
+def load():
+    """Inner-join the three benchmarks on (lens_index, image)."""
+    gp = Table.read(os.path.join(HERE, "gp_only_benchmark.ecsv"))
+    fast = Table.read(os.path.join(HERE, "delay_benchmark_fast.ecsv"))
+    rob = Table.read(os.path.join(HERE, "delay_benchmark_robust.ecsv"))
 
-    # Evenly spaced across the delay-sorted list, plus force-include the
-    # single widest-delay system so the robust-vs-fast comparison actually
-    # exercises the failure mode fast mode is riskiest for.
-    picks = {lens_ids[int(round(x))] for x in np.linspace(0, len(lens_ids) - 1, n - 1)}
-    picks.add(lens_ids[-1])
-    return sorted(picks, key=lambda i: by_lens[i])
+    def key(t):
+        return {(int(r["lens_index"]), str(r["image"])): r for r in t}
+
+    kg, kf, kr = key(gp), key(fast), key(rob)
+    common = sorted(set(kg) & set(kf) & set(kr))
+
+    rows = []
+    for k in common:
+        g, f, r = kg[k], kf[k], kr[k]
+        rows.append({
+            "lens_index": k[0], "image": k[1],
+            "true_delay": float(g["true_delay"]),
+            "res_GP": float(g["residual"]), "res_fast": float(f["residual"]),
+            "res_robust": float(r["residual"]),
+            "t_GP": float(g["wall_time_s"]), "t_fast": float(f["fit_time_s"]),
+            "t_robust": float(r["fit_time_s"]),
+            "gp_quality": str(g["quality"]),
+        })
+    return Table(rows)
 
 
-def process_one(i, lens, label, mode_kwargs, seed_offset):
-    import warnings
-    warnings.filterwarnings("ignore")
-
-    try:
-        zS = float(lens.source_redshift_list[0])
-    except Exception:
-        return None
-
-    # Same seed per lens regardless of variant -> identical noise realization,
-    # so any difference in outcome is attributable to the fitting knobs only.
-    rng = np.random.default_rng(seed_offset + i)
-    result = measure_one(
-        lens, BANDS, zS,
-        cadence_days=CADENCE,
-        depth_5sig=DEFAULT_DEPTH_5SIG,
-        rng=rng,
-        lens_index=i,
-        **mode_kwargs,
-    )
-    if result is not None:
-        result["lens_index"] = i
-        result["fit_mode"] = label
-    return result
+def stats(res, t):
+    res = res[np.isfinite(res)]
+    return {
+        "n": len(res),
+        "median": np.median(res),
+        "p68": np.percentile(np.abs(res), 68),
+        "lt2": np.mean(np.abs(res) < 2) * 100,
+        "lt5": np.mean(np.abs(res) < 5) * 100,
+        "t_med": np.median(t[np.isfinite(t)]),
+    }
 
 
 def main():
-    register_roman_bands()
+    tab = load()
+    print(f"Common systems across all three benchmarks: {len(tab)}")
 
-    lens_indices = select_lens_indices(N_COMPARE)
-    print(f"Comparing variants={list(VARIANTS)} on {len(lens_indices)} systems: {lens_indices}")
+    methods = ["GP", "fast", "robust"]
+    S = {m: stats(np.asarray(tab[f"res_{m}"]), np.asarray(tab[f"t_{m}"]))
+         for m in methods}
+    good = tab[tab["gp_quality"] == "good"]
+    S["GP (good)"] = stats(np.asarray(good["res_GP"]), np.asarray(good["t_GP"]))
 
-    with open(PICKLE, "rb") as f:
-        payload = pickle.load(f)
-    pop = payload["lens_population"]
+    print(f"\n{'method':<10} {'n':>4} {'median':>8} {'P68|res|':>9} "
+          f"{'<2d':>6} {'<5d':>6} {'med time':>9}")
+    for m, s in S.items():
+        print(f"{m:<10} {s['n']:>4} {s['median']:>+7.2f}d {s['p68']:>8.2f}d "
+              f"{s['lt2']:>5.0f}% {s['lt5']:>5.0f}% {s['t_med']:>8.1f}s")
 
-    jobs = [
-        (i, pop[i], label, mode_kwargs)
-        for i in lens_indices
-        for label, mode_kwargs in VARIANTS.items()
-    ]
-    print(f"Running {len(jobs)} fits with {N_JOBS} workers...")
-    results = Parallel(n_jobs=N_JOBS, verbose=10)(
-        delayed(process_one)(i, lens, label, mode_kwargs, SEED) for i, lens, label, mode_kwargs in jobs
-    )
+    # ── figure ──────────────────────────────────────────────────────────
+    fig, axes = plt.subplots(2, 2, figsize=(11, 8.5), facecolor="white")
+    fig.subplots_adjust(hspace=0.42, wspace=0.30, top=0.90, bottom=0.08,
+                        left=0.08, right=0.97)
+    for ax in axes.flat:
+        ax.set_facecolor("white")
+        ax.grid(True, color="#e8e7e0", lw=0.7, zorder=0)
+        for s in ("top", "right"):
+            ax.spines[s].set_visible(False)
+        for s in ("left", "bottom"):
+            ax.spines[s].set_color(MUTED)
+        ax.tick_params(colors=MUTED, labelsize=9)
 
-    rows = []
-    for res in results:
-        if res is None:
-            continue
-        fit_time_s = res["diagnostics"].get("fit_time_s", np.nan)
-        if res["status"] != "ok":
-            rows.append({
-                "lens_index": res["lens_index"], "fit_mode": res["fit_mode"],
-                "image": "", "true_delay": np.nan, "fit_delay": np.nan,
-                "residual": np.nan, "fit_time_s": fit_time_s,
-                "status": res["status"],
-            })
-            continue
-        for img, td_true in res["true_delays"].items():
-            if img == "image_1":
-                continue
-            td_fit = res["fit_delays"].get(img, np.nan)
-            rows.append({
-                "lens_index": res["lens_index"], "fit_mode": res["fit_mode"],
-                "image": img, "true_delay": td_true, "fit_delay": td_fit,
-                "residual": td_fit - td_true, "fit_time_s": fit_time_s,
-                "status": "ok",
-            })
+    # (a) ECDF of |residual| — accuracy at every threshold at once
+    ax = axes[0, 0]
+    for m in methods:
+        r = np.sort(np.abs(np.asarray(tab[f"res_{m}"])))
+        r = r[np.isfinite(r)]
+        ax.step(np.clip(r, 1e-2, None), np.arange(1, len(r) + 1) / len(r),
+                color=COLORS[m], lw=2, label=m, zorder=3)
+    ax.set_xscale("log")
+    ax.set_xlim(0.03, 300)
+    ax.set_ylim(0, 1.02)
+    ax.axvline(2, color=MUTED, lw=0.8, ls=":", zorder=1)
+    ax.text(2, 1.01, " 2 d", color=MUTED, fontsize=8, va="bottom")
+    ax.set_xlabel("|residual|  (days)", color=TEXT)
+    ax.set_ylabel("fraction of systems below", color=TEXT)
+    ax.set_title("Accuracy: |residual| distribution (ECDF)",
+                 color=TEXT, fontsize=11, loc="left")
+    ax.legend(frameon=False, loc="lower right", fontsize=9)
 
-    tab = Table(rows)
-    tab.write(OUTPUT_FILE, overwrite=True)
-    print(f"\nSaved -> {OUTPUT_FILE}")
+    # (b) residual vs true delay — where each method breaks down
+    ax = axes[0, 1]
+    for m in methods:
+        ax.scatter(tab["true_delay"], tab[f"res_{m}"], s=14,
+                   color=COLORS[m], alpha=0.55, label=m, zorder=3,
+                   edgecolors="white", linewidths=0.4)
+    ax.axhline(0, color=MUTED, lw=0.8, zorder=1)
+    ax.set_ylim(-25, 25)
+    ax.set_xlabel("true delay  (days)", color=TEXT)
+    ax.set_ylabel("residual  (days)", color=TEXT)
+    ax.set_title("Residual vs true delay  (clipped to ±25 d)",
+                 color=TEXT, fontsize=11, loc="left")
+    ax.legend(frameon=False, loc="upper right", fontsize=9)
 
-    print(f"\n{'='*60}")
-    for mode in VARIANTS:
-        sub = tab[tab["fit_mode"] == mode]
-        ok = sub[sub["status"] == "ok"]
-        res_arr = np.array(ok["residual"])
-        res_arr = res_arr[np.isfinite(res_arr)]
-        time_arr = np.array(sub["fit_time_s"])
-        time_arr = time_arr[np.isfinite(time_arr)]
-        if len(res_arr):
-            print(f"[{mode}] {len(ok)}/{len(sub)} ok  "
-                  f"residual median={np.median(res_arr):+.2f}d std={np.std(res_arr):.2f}d")
-        else:
-            print(f"[{mode}] {len(ok)}/{len(sub)} ok  no successful fits")
-        if len(time_arr):
-            print(f"          fit time median={np.median(time_arr):.1f}s "
-                  f"mean={np.mean(time_arr):.1f}s max={np.max(time_arr):.1f}s")
-    print(f"{'='*60}")
+    # (c) time per system — log-spaced histograms
+    ax = axes[1, 0]
+    all_t = np.concatenate([np.asarray(tab[f"t_{m}"]) for m in methods])
+    all_t = all_t[np.isfinite(all_t) & (all_t > 0)]
+    bins = np.geomspace(all_t.min() * 0.8, all_t.max() * 1.2, 30)
+    for m in methods:
+        t = np.asarray(tab[f"t_{m}"])
+        ax.hist(t[np.isfinite(t)], bins=bins, histtype="step", lw=2,
+                color=COLORS[m], label=m, zorder=3)
+    ax.set_xscale("log")
+    ax.set_xlabel("time per system  (s)", color=TEXT)
+    ax.set_ylabel("systems", color=TEXT)
+    ax.set_title("Speed: per-system measurement time",
+                 color=TEXT, fontsize=11, loc="left")
+    ax.legend(frameon=False, loc="upper left", fontsize=9)
+
+    # (d) the trade-off: accuracy vs speed, one point per method
+    ax = axes[1, 1]
+    for m, s in S.items():
+        base = m.split(" ")[0]
+        filled = "(" not in m
+        ax.scatter(s["t_med"], s["p68"], s=110, zorder=3,
+                   color=COLORS[base] if filled else "white",
+                   edgecolors=COLORS[base], linewidths=2)
+        ax.annotate(f"{m}\n{s['lt2']:.0f}% < 2 d", (s["t_med"], s["p68"]),
+                    textcoords="offset points", xytext=(10, 6),
+                    fontsize=9, color=TEXT)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("median time per system  (s)", color=TEXT)
+    ax.set_ylabel("P68 |residual|  (days)", color=TEXT)
+    ax.set_title("The trade-off: accuracy vs cost",
+                 color=TEXT, fontsize=11, loc="left")
+    ax.margins(x=0.25, y=0.25)
+
+    fig.suptitle(f"Time-delay methods on {len(tab)} common systems "
+                 f"(identical simulations)", color=TEXT, fontsize=13, x=0.08,
+                 ha="left", y=0.96)
+    out = os.path.join(FIGDIR, "benchmark_comparison.png")
+    fig.savefig(out, dpi=150)
+    print(f"\nSaved -> {out}")
 
 
 if __name__ == "__main__":

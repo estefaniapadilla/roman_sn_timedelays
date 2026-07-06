@@ -25,14 +25,14 @@ Performance tips
 - return_as="generator" (joblib ≥1.3) lets us save incrementally so a crash
   does not lose all results.
 
-Run example:
-python scripts/run_bayesn_population.py \\
-  --pickle /path/roman_deep_lens_population_compat.pkl \\
-  --survey time_domain_deep \\
-  --bayesn_yaml /path/BAYESN.YAML \\
-  --filters_yaml /path/filters.yaml \\
-  --outdir /path/pop_out \\
-  --n_jobs 8 --n_systems 50
+Run example (all arguments have defaults — repo-root pickle/BAYESN.YAML/
+filters.yaml, outdir=outputs/bayesn_run, deep survey):
+python scripts/run_bayesn_population.py --n_jobs 8 --n_systems 50
+
+Outputs delay_benchmark_bayesn.ecsv with both time delays and flux
+(magnification) ratios: mu_<img> is sampled in the series fit relative to the
+reference (brightest) image; the color fit cannot constrain it because
+magnification cancels in band-to-band differences.
 """
 
 from __future__ import annotations
@@ -80,6 +80,7 @@ def process_one_lens(
     npoints_series: int,
     npoints_color: int,
     ncpu_fit: int,
+    maxcall: Optional[int],
     outdir: Optional[str],
 ) -> Dict[str, Any]:
     """End-to-end processing for one lens system (runs inside a joblib worker)."""
@@ -115,13 +116,40 @@ def process_one_lens(
         truth_kept = sim_info["truth"]
         images = truth_kept["images"]
 
+        # Stage-1 GP priming (~5 s): a trustworthy coarse delay shrinks the
+        # sampler's search volume so it can converge inside maxcall. Only
+        # "good"-quality estimates are used; anything else falls back to the
+        # wide peak-offset windows.
+        dt_hints, hint_ref, gp_summary = None, None, None
+        try:
+            from roman_td.crosscorr import gp_cross_correlate
+            gp = gp_cross_correlate(tab, images,
+                                    rng=np.random.default_rng(seed + i + 777))
+            hint_ref = gp["ref_image"]
+            gp_summary = {img: {"dt_gp": e["dt_gp"], "dt_gp_err": e["dt_gp_err"],
+                                "quality": e["quality"],
+                                "flux_ratio": e["flux_ratio"]}
+                          for img, e in gp["per_image"].items()}
+            good = {img: (e["dt_gp"], e["dt_gp_err"])
+                    for img, e in gp["per_image"].items()
+                    if e["quality"] == "good"}
+            dt_hints = good or None
+        except Exception:
+            pass
+        out["gp"] = gp_summary
+
         misn = make_misn_from_table(tab, images, object_name=f"lens_{i:05d}")
         fit_series, fit_color, timing, ref = fit_system(
             misn, tab, zS, images,
             npoints_series=npoints_series,
             npoints_color=npoints_color,
             ncpu_fit=ncpu_fit,
+            maxcall=maxcall,
+            dt_hints=dt_hints,
+            hint_ref=hint_ref,
         )
+        out["converged"] = not (timing.get("series_hit_cap", False)
+                                or timing.get("color_hit_cap", False))
 
         # Use color fit delays if available; fall back to series if color was skipped
         # (color is skipped when fewer than 2 bands are in the data)
@@ -139,6 +167,23 @@ def process_one_lens(
                 td[_img] = float("nan")
                 td_err[_img] = [float("nan"), float("nan")]
 
+        # Flux (magnification) ratios always come from the SERIES fit: the
+        # color fit works on band-to-band differences, where per-image
+        # magnification cancels out.
+        params_ser, res_ser = fit_series
+        vp_ser = list(res_ser.vparam_names)
+        mu_fit: Dict[str, Any] = {ref: 1.0}
+        mu_fit_err: Dict[str, Any] = {ref: [0.0, 0.0]}
+        for _img in [im for im in images if im != ref]:
+            _key = f"mu_{_img}"
+            if _key in vp_ser:
+                _lo, _med, _hi = params_ser[vp_ser.index(_key)]
+                mu_fit[_img] = float(_med)
+                mu_fit_err[_img] = [float(_med - _lo), float(_hi - _med)]
+            else:
+                mu_fit[_img] = float("nan")
+                mu_fit_err[_img] = [float("nan"), float("nan")]
+
         out.update({
             "z_lens": truth_kept["z_lens"], "z_source": zS,
             "n_images": truth_kept["n_images"],
@@ -147,6 +192,8 @@ def process_one_lens(
             "true_mu": {img: float(m) for img, m in zip(images, truth_kept["mu"])},
             "fit_delays": {k: _to_builtin(v) for k, v in td.items()},
             "fit_delay_errors": {k: _to_builtin(v) for k, v in td_err.items()},
+            "fit_mu_ratio": {k: _to_builtin(v) for k, v in mu_fit.items()},
+            "fit_mu_ratio_errors": {k: _to_builtin(v) for k, v in mu_fit_err.items()},
             "sim_params": {k: v for k, v in sim_info.items() if k != "truth"},
             "timing": timing,
         })
@@ -171,14 +218,22 @@ def process_one_lens(
         return out
 
 
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pickle", required=True)
-    ap.add_argument("--survey", default="time_domain_wide",
+    ap.add_argument("--pickle",
+                    default=os.path.join(REPO_ROOT, "data",
+                                         "roman_deep_lens_population_compat.pkl"))
+    ap.add_argument("--survey", default="time_domain_deep",
                     choices=list(SURVEY_BANDS.keys()))
-    ap.add_argument("--bayesn_yaml", required=True)
-    ap.add_argument("--filters_yaml", required=True)
-    ap.add_argument("--outdir", required=True)
+    ap.add_argument("--bayesn_yaml",
+                    default=os.path.join(REPO_ROOT, "BAYESN.YAML"))
+    ap.add_argument("--filters_yaml",
+                    default=os.path.join(REPO_ROOT, "filters.yaml"))
+    ap.add_argument("--outdir",
+                    default=os.path.join(REPO_ROOT, "outputs", "bayesn_run"))
     ap.add_argument("--cadence", type=float, default=5.0)
     ap.add_argument("--n_systems", type=int, default=50,
                     help="Stop after this many successful fits (0 = all)")
@@ -188,13 +243,19 @@ def main():
                     help="CPUs per dynesty fit. Keep 1 when n_jobs > 1.")
     ap.add_argument("--npoints_series", type=int, default=500)
     ap.add_argument("--npoints_color", type=int, default=500)
+    ap.add_argument("--maxcall", type=int, default=50_000,
+                    help="Cap on likelihood calls per fit stage. SNTD's "
+                         "0.1-day phase rounding creates likelihood plateaus "
+                         "on which nestle can grind indefinitely (observed "
+                         ">13 h on one system); 50k caps a stage at ~30 min. "
+                         "0 = unbounded (not recommended).")
     ap.add_argument("--save_every", type=int, default=10)
     ap.add_argument("--save_payloads", action="store_true",
                     help="Write per-lens JSON payloads + error tracebacks")
     args = ap.parse_args()
 
     os.makedirs(args.outdir, exist_ok=True)
-    benchmark_path = os.path.join(args.outdir, "delay_benchmark.ecsv")
+    benchmark_path = os.path.join(args.outdir, "delay_benchmark_bayesn.ecsv")
     payload_dir = args.outdir if args.save_payloads else None
 
     t_start = time.time()
@@ -218,6 +279,7 @@ def main():
             i, lens, bands, args.cadence, DEFAULT_DEPTH_5SIG, args.seed,
             args.bayesn_yaml, args.filters_yaml,
             args.npoints_series, args.npoints_color, args.ncpu_fit,
+            args.maxcall if args.maxcall > 0 else None,
             payload_dir,
         )
         for i, lens in enumerate(pop)
