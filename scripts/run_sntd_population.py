@@ -51,8 +51,8 @@ N_JOBS = 32         # use all cores; set to -1 to auto-detect
 SAVE_EVERY = 10
 FIT_MODE = "gp"  # "robust" (wide bounds, slow) | "fast" (trial_fit-recentered, capped) | "gp" (GP-primed windows, robust fallback)
 
-OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, f"delay_benchmark_{FIT_MODE}.ecsv")
+from roman_td.paths import benchmark_path
+OUTPUT_FILE = benchmark_path(f"delay_benchmark_{FIT_MODE}.ecsv")
 
 
 def process_one_lens(i, lens, bands, cadence, depth, seed_offset, fit_mode):

@@ -39,9 +39,12 @@ TEXT, MUTED = "#1a1a19", "#6b6a60"
 
 def load():
     """Inner-join the three benchmarks on (lens_index, image)."""
-    gp = Table.read(os.path.join(HERE, "gp_only_benchmark.ecsv"))
-    fast = Table.read(os.path.join(HERE, "delay_benchmark_fast.ecsv"))
-    rob = Table.read(os.path.join(HERE, "delay_benchmark_robust.ecsv"))
+    import sys
+    sys.path.insert(0, os.path.join(HERE, ".."))
+    from roman_td.paths import find_benchmark
+    gp = Table.read(find_benchmark("gp_only_benchmark.ecsv"))
+    fast = Table.read(find_benchmark("delay_benchmark_fast.ecsv"))
+    rob = Table.read(find_benchmark("delay_benchmark_robust.ecsv"))
 
     def key(t):
         return {(int(r["lens_index"]), str(r["image"])): r for r in t}

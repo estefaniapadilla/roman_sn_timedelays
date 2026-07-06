@@ -51,8 +51,8 @@ N_JOBS = 8
 MIN_IMAGE_SNR = 5.0         # GP works below the fitter's SNR >= 10 cut
 LAG_RANGE = (-200, 200)
 
-OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, "gp_benchmark.ecsv")
+from roman_td.paths import benchmark_path
+OUTPUT_FILE = benchmark_path("gp_only_benchmark.ecsv")
 
 
 def process_one_lens(i, lens):

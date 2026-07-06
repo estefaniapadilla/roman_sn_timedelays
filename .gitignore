@@ -11,6 +11,7 @@ pop_out/
 *__color_res.pkl
 *__series_fittab.pkl
 *__color_fittab.pkl
+outputs/
 
 # Python
 __pycache__/
