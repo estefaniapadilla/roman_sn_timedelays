@@ -154,6 +154,7 @@ def simulate_photometry(
     cadence_days: float,
     depths: Dict[str, float],
     rng: np.random.Generator,
+    sn_params: Optional[Dict[str, float]] = None,
 ) -> Tuple[Optional[at.Table], Dict[str, Any]]:
     """Simulate Roman photometry for all lensed images of one system using BayeSN.
 
@@ -175,8 +176,14 @@ def simulate_photometry(
     delays, mu = truth["delays"], truth["mu"]
 
     model = make_model(zS)
-    theta = float(rng.normal(0, 1))
-    hostebv = float(min(rng.exponential(0.1), 1.0))
+    if sn_params is not None:
+        # Pre-drawn SN (training sets: several NOISE realizations of the
+        # SAME supernova — rng below then only controls the noise).
+        theta = float(sn_params["theta"])
+        hostebv = float(sn_params["hostebv"])
+    else:
+        theta = float(rng.normal(0, 1))
+        hostebv = float(min(rng.exponential(0.1), 1.0))
     model.set(theta=theta, hostebv=hostebv, hostr_v=3.1)
     set_amplitude_for_distance(model, zS, bands[len(bands) // 2])
     sim_params = {

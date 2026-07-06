@@ -91,7 +91,7 @@ inductive bias for pairwise-comparison discovery.
 
 ```
 token = [ phase_norm, flux_norm, fluxerr_norm,
-          band_onehot(6), image_onehot(4), is_real ]     -> 13 features
+          band_onehot(6), image_onehot(4), is_real ]     -> 14 features
 ```
 
 Construction order matters; each step exists for a reason:
@@ -160,7 +160,7 @@ Target size ≈ **1–3 M parameters** — deliberately small. Sizing rule: do n
 scale up until both the GBT baseline and this size are saturated.
 
 ```
-tokens (L_max × 13)
+tokens (L_max × 14)
   │  linear embed -> d_model = 128
   ▼
 [CLS] token prepended                      # learned summary slot
