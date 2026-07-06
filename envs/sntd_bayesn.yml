@@ -1,0 +1,37 @@
+# Fitting/simulation environment — the delicate one. Recreate with:
+#   conda env create -f envs/sntd_bayesn.yml
+#   then install bayesn from its repo (see note at bottom)
+#
+# For an EXACT clone of the working machine instead, use
+# envs/sntd_bayesn.lock.yml (full pinned export, machine-specific).
+name: sntd_bayesn
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      # numpy<2 is load-bearing: sntd 2.5.7 / sncosmo 2.12.1 era packages
+      # break under numpy 2.x ABI changes
+      - numpy==1.26.4
+      - scipy==1.13.1
+      - astropy==6.1.7
+      - matplotlib==3.10.9
+      - scikit-learn==1.7.2
+      - joblib==1.5.3
+      - sncosmo==2.12.1
+      - sntd==2.5.7
+      - nestle==0.2.1
+      - slsim==0.1.1
+      - lenstronomy==1.14.0
+      - numpyro==0.19.0
+      - jax==0.6.2
+      - jaxlib==0.6.2
+      - speclite==1.0.0
+      - corner==2.2.3
+      - tqdm
+
+# NOT pip-installable: bayesn 0.4.1 is installed from a local checkout
+# (original machine: /home/epadill/bayesn). To recreate:
+#   git clone https://github.com/bayesn/bayesn  (pin to the 0.4.1 tag/commit)
+#   pip install -e ./bayesn

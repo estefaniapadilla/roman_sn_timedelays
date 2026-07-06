@@ -1,0 +1,26 @@
+# ML/training environment — PROPOSED, separate from sntd_bayesn by design.
+# Create with:
+#   conda env create -f envs/roman_ml.yml
+#
+# Deliberately minimal and independent of the fitting stack: it reads the
+# training files (outputs/training/*) written by the sntd_bayesn env and
+# imports only roman_td.tokenize / roman_td.paths (pure numpy). The two
+# envs never coexist in one process, so neither can break the other.
+#
+# CPU-only torch: this machine has no GPU, and the Stage-2 transformer is
+# 1-3M parameters — CPU training is entirely adequate.
+name: roman_ml
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - scipy
+  - astropy          # reads the ecsv training tables
+  - scikit-learn     # baselines, calibration, metrics
+  - matplotlib
+  - joblib
+  - pip
+  - pip:
+      - --extra-index-url https://download.pytorch.org/whl/cpu
+      - torch        # CPU wheel via the index URL above
