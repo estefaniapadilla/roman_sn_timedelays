@@ -503,6 +503,9 @@ scatter, flux ratios, n_obs, peak SNRs, z's, quality flag) predicting the same
 targets. If it meets the Δt accuracy bar, the transformer is optional for
 delays; either way it sets the number the transformer must beat.
 
+**Status: BUILT** — `scripts/gbt_baseline.py`; method and results in
+`documents/gbt_baseline_explained.md`.
+
 ---
 
 ## 6. Data contracts (exact schemas)

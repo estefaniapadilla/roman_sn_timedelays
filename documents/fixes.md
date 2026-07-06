@@ -5,6 +5,7 @@ git history. Add a row when a bug costs > 1 hour or changes results.
 
 | Date | Problem | Root cause | Fix | Files |
 |---|---|---|---|---|
+| 07-06 | GBT baseline scored 2× *worse* than the raw GP it was built on | Target was the absolute delay: piecewise-constant trees waste all capacity re-learning the trivial "prediction ≈ dt_gp" identity | Predict the residual (true − dt_gp) and add it back — "predict 0" then equals raw-GP accuracy | `gbt_baseline.py` |
 | 07-06 | Historical benchmark misattributed | `delay_benchmark.ecsv` is from the **SALT** driver, not BayeSN — BayeSN two-stage has *never* been seen to converge on this population | Treat BayeSN viability as an open feasibility question | (docs only) |
 | 07-06 | BayeSN fits grind forever (13 h) or return bound-pinned garbage with fake zero-width errors | Likelihood plateaus (SNTD rounds phases to 0.1 d) + linear-uniform amplitude prior over 90,000× range + blind ±40 d delay windows | `maxcall` cap + `converged` flag in benchmark; log-uniform amplitude prior; GP-primed delay windows; color-stage crash caught → series fallback | `bayesn_wrapper.py`, `run_bayesn_population.py` |
 | 07-05 | GP: confident wrong delay (−179 d vs +25 d true) | Flat zero-flux baselines correlate spuriously at extreme lags | Only score lags where bright parts (>30% of peak) of both curves overlap | `crosscorr.py` |
