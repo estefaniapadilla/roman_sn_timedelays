@@ -5,6 +5,9 @@ git history. Add a row when a bug costs > 1 hour or changes results.
 
 | Date | Problem | Root cause | Fix | Files |
 |---|---|---|---|---|
+| 07-07 | **BayeSN sim (Path B) evaluated the SED ~60,000 d after peak** — every flux in the tier1 training set (384 examples) is wild model extrapolation, some bands 10³⁰× too bright; smoke + tier1_v1 transformer runs trained on garbage. Benchmarks unaffected (Path A/lenstronomy) | `span_lo = t0 + model.mintime()` double-counts t0 (sncosmo min/maxtime already include t0); the phase cut compared relative phase to absolute time, masking the crash | Span = model time range directly; phase cut on `mjd − dt` vs model range. Verified: peak mags 24–26, image peaks at t0+dt, GP recovers delays | `simulate.py` |
+| 07-07 | Sims too optimistic vs HLTDS spec: every filter at 5 d — HLTDS spec is one anchor filter at 5 d + rest at 10 d (per tier) → existing benchmarks/training set have ~2× too many points in the 10-day filters (optimistic) | Simulator had a single global cadence; per-filter CCS spec not yet encoded | `SURVEY_CADENCE` + `SURVEY_EXPTIME` + `SURVEY_DEPTH_5SIG` in `simulate.py` (depths from CCS exposure times × WFI 1-hr sensitivities, m5 − 1.25·log₁₀(3600/t)); `simulate_photometry` takes per-band cadences; builder uses per-tier spec by default | `simulate.py`, `build_training_set.py` |
+| 07-06 | **Verdict: BayeSN two-stage INFEASIBLE** — even with every mitigation (GP-primed windows, log-uniform amplitude, 200k-call cap), one system took 5.4 h, both stages hit the cap, and the delay came back pinned at the −30 d window bound (true +9.78 d) with zero-width errors | Plateau pathology (below) survives all repo-side mitigations at these SNRs | Abandon series/color route; forward path = BayeSN SED via SNTD **parallel** method (unbuilt) | (verdict — docs only) |
 | 07-06 | GBT baseline scored 2× *worse* than the raw GP it was built on | Target was the absolute delay: piecewise-constant trees waste all capacity re-learning the trivial "prediction ≈ dt_gp" identity | Predict the residual (true − dt_gp) and add it back — "predict 0" then equals raw-GP accuracy | `gbt_baseline.py` |
 | 07-06 | Historical benchmark misattributed | `delay_benchmark.ecsv` is from the **SALT** driver, not BayeSN — BayeSN two-stage has *never* been seen to converge on this population | Treat BayeSN viability as an open feasibility question | (docs only) |
 | 07-06 | BayeSN fits grind forever (13 h) or return bound-pinned garbage with fake zero-width errors | Likelihood plateaus (SNTD rounds phases to 0.1 d) + linear-uniform amplitude prior over 90,000× range + blind ±40 d delay windows | `maxcall` cap + `converged` flag in benchmark; log-uniform amplitude prior; GP-primed delay windows; color-stage crash caught → series fallback | `bayesn_wrapper.py`, `run_bayesn_population.py` |
@@ -26,3 +29,8 @@ git history. Add a row when a bug costs > 1 hour or changes results.
 - **Key numbers** (07-06): BayeSN likelihood 33 ms/call vs SALT 12 ms;
   log-uniform amplitude alone raised sampler acceptance 5×; still hit the
   50k cap on the test lens.
+- **Feasibility test** (07-06, behind the verdict row): lens 2, zS=3.62,
+  2 bands, true dt +9.78 d; npoints=500, maxcall=200k/stage, GP hints ON.
+  Series 38 min / 200,082 calls (capped); color 287 min / 200,009 calls
+  (capped); dt fit −30.00 [−30.00, −30.00] (bound-pinned), mu fit 2.496
+  pinned (true 0.532). 5.4 h → garbage. Two-stage route closed.

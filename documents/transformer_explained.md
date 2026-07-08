@@ -1,13 +1,15 @@
 # The Transformer (Stage 2), Explained
 
-A detailed guide to the planned Stage-2 neural network — what it is for,
-where it sits in the pipeline, exactly what goes in, what happens inside,
-the training and serving infrastructure, and what comes out. Companion to
-`pipeline_architecture.md` §3 (the specification) and
-`gp_crosscorr_explained.md` (Stage 1, which feeds it). Status: **[TO BUILD]**
-— gated on the training-set builder (architecture §7 item 6), the
-microlensing injection (item 7), and the gradient-boosted-tree baseline
-(item 8), in that order.
+A detailed guide to the Stage-2 neural network — what it is for, where it
+sits in the pipeline, exactly what goes in, what happens inside, the
+training and serving infrastructure, and what comes out. Companion to
+`pipeline_architecture.md` §3 (the specification),
+`gp_crosscorr_explained.md` (Stage 1, which feeds it), and
+`transformer_training_explained.md` (how the learning itself works:
+forward pass, loss, optimizer, training loop). Status: **BUILT**
+(2026-07-07: model + dataset + driver exist and train; first real runs on
+the spec-consistent deep tier in progress; microlensing injection — tier 2
+— still pending, so the micro head currently learns only "report zero").
 
 ---
 

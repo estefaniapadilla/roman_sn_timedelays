@@ -43,6 +43,18 @@ training, no new data.
 | Target | `true_delay` (simulation truth) |
 | Excluded | anything from the truth record — every feature exists for real Roman data |
 
+Two common misreadings, corrected:
+
+- **The features are properties of the MEASUREMENT, not of the supernova.**
+  No stretch, color, or brightness enters — the model sees how the GP's
+  measurement went (its estimate, error, band disagreement, quality flag)
+  plus observing conditions (SNRs, redshifts, band/image counts), and
+  learns patterns in when and how that measurement errs.
+- **The output is a correction + error band, not a grade.** The model
+  predicts how wrong `dt_gp` likely is in the given circumstances; the
+  corrected delay is `dt_gp + correction`. "Is it accurate?" is answered
+  by the quantile band's width, not a binary verdict.
+
 ## 4. Honest evaluation — two protocol rules
 
 1. **Out-of-fold predictions, grouped by lens system.** 5-fold
@@ -130,3 +142,28 @@ Calibration: truth inside the GBT's [16%, 84%] band 60% of the time
 4. **Method lesson (also in fixes.md):** with a strong baseline estimate
    in hand, predict *corrections to it*, never the absolute quantity —
    piecewise-constant trees pay a heavy tax re-learning identity.
+
+## 9. What this taught the transformer
+
+Mostly *strategic* knowledge, not transferable weights:
+
+1. **The bar, precisely.** On `good` systems nothing was learnable from
+   summaries — the GP's 1.59 d P68 is the summary-feature ceiling. The
+   transformer's delay mandate is therefore exact: extract improvement
+   from the RAW light curves; headroom = 1.59 → 1.19 d (robust's level).
+   If it can't beat 1.59 d, its delay head is decorative and its value
+   rests on microlensing.
+2. **The scalar features are the right ones.** The GBT's importances
+   (`dt_gp_err`, `quality=fail`, `band_scatter`, `snr_img`) independently
+   rediscovered the transformer's designed scalar-feature block.
+3. **Corrections, not absolutes.** The absolute-target failure (2× worse
+   than doing nothing) carries over: the GP hint enters the transformer as
+   a feature so the network refines rather than re-derives. Attention pays
+   a smaller identity-learning tax than trees, but the principle holds.
+4. **Calibration is never free.** Even the quantile bands were
+   overconfident (60% coverage vs 68% target) — empirical justification
+   for the transformer's mandatory post-training calibration pass.
+
+Side product: the 164 → 48 d improvement on untrusted systems could rank
+which fallback systems deserve robust-fit CPU first ("salvage ranking") —
+operational triage, not measurement.

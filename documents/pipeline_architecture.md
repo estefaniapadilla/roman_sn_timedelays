@@ -117,6 +117,36 @@ labels feed transformer training (Stage 2) and every benchmark.
    not necessarily slsim's image 1. Every downstream consumer must use the
    `images` list from `sim_info["truth"]`, never assume `image_1`.
 
+**HLTDS imaging spec (Core Community Survey, added 2026-07-07)** — encoded
+in `simulate.SURVEY_BANDS` / `simulate.SURVEY_CADENCE`; the training-set
+builder uses these per-filter cadences by default (`--cadence` = flat
+override for controlled experiments):
+
+| Tier | Filters | Cadence |
+|---|---|---|
+| Wide | F062 | 5 d |
+| Wide | F087, F106, F129, F158 | 10 d |
+| Deep | F087 | 5 d |
+| Deep | F106, F129, F158, F184 | 10 d |
+
+Each tier = one anchor filter every 5-day visit + four filters every other
+visit. Per-visit 5σ depths (`SURVEY_DEPTH_5SIG`) are derived from the CCS
+exposure times and the WFI 1-hour sensitivities (Roman Technical Information
+Repository, 2026) via background-limited scaling m5(t) = m5(1hr) −
+1.25·log₁₀(3600/t):
+
+| Tier | F062 | F087 | F106 | F129 | F158 | F184 |
+|---|---|---|---|---|---|---|
+| Wide (t_exp s) | 25.75 (60) | 25.60 (85) | 25.63 (95) | 25.88 (152) | 26.16 (294) | — |
+| Deep (t_exp s) | — | 26.04 (193) | 26.24 (294) | 26.26 (307) | 26.35 (420) | 26.52 (1636) |
+
+**Everything simulated before 2026-07-07 is NOT spec-consistent** (see
+fixes.md): flat 5-day cadence in all filters, depths 0.6–1.5 mag too deep,
+and Path B additionally had the t0 double-count bug (fluxes were model
+extrapolation ~60,000 d past peak → tier1 training set + first transformer
+runs invalid). Path A benchmarks are internally valid but optimistic
+relative to this spec.
+
 **Path C [TO BUILD]: microlensing + tier injection.** Neither existing path
 simulates microlensing (Path A's docstring states this explicitly — each image
 gets a *flat* macro magnification). The extension:
@@ -326,6 +356,23 @@ features (and set the quality one-hot to `fail`). This forces the network to
 solve the problem from tokens alone and treats the hint as refinement, so a
 wrong GP estimate at inference cannot fully steer the prediction.
 
+**Window-crop augmentation (added 2026-07-07; off by default):** the stored
+curves cover each event completely, but real HLTDS curves are clipped by the
+survey campaign — a SN peaking near the survey start is caught post-peak
+only, and a trailing image (peak at +dt) may be caught pre-explosion or
+missed. With `--crop_prob p`, each train example is clipped (prob p, fresh
+every epoch) to ONE shared observer-time window of `--crop_window` days slid
+randomly over the event — shared because Roman sees all images at every
+visit, so per-image truncation falls out of the delays automatically.
+Guards: reference image must keep ≥5 points and ≥2 images must survive
+(else full curve); an image left with <3 points gets its dt/logmu loss
+masked (unmeasurable); a crop removing >20% of points also drops the GP
+hint (the full-curve GP answer would leak unseen data). Val/test always use
+full curves; truncation-stratified evaluation is a separate pass. Known
+approximation: `t_peak_ref` (phase zero-point) still comes from the
+full-curve GP — a global shift, harmless for delays, mildly informative for
+the SN-parameter heads.
+
 **Redshift assumption:** both `z_lens` and `z_source` are available for every
 system (survey design guarantees deflector and source redshifts), so they are
 fed as exact scalar features with no missing-value handling and no jitter
@@ -433,7 +480,7 @@ knobs (`t0_window`, `t0_pad_days`, `npoints`, `maxcall`) bundled as
 write `mu_ratio_fit = x0_i / x0_ref` — the magnification ratio is currently
 computed by the sampler and thrown away (design doc §7).
 
-### 4.3 Path B — BayeSN two-stage, `bayesn_wrapper.fit_system()` (EXISTS)
+### 4.3 Path B — BayeSN two-stage, `bayesn_wrapper.fit_system()` (EXISTS — measured INFEASIBLE 2026-07-06)
 
 **Inputs:** MISN object + combined table (Stage-0 Path B), z, images,
 `npoints_series`, `npoints_color` (500 default; 100–200 acceptable),
@@ -453,8 +500,17 @@ computed by the sampler and thrown away (design doc §7).
    Falls back to series results if < 2 bands.
 
 **Outputs:** per-image delay posteriors (median, ±1σ from quantiles), timing
-per stage, ref label → `delay_benchmark.ecsv` + optional per-lens JSON
+per stage, ref label → `delay_benchmark_bayesn.ecsv` + optional per-lens JSON
 payloads.
+
+**Verdict (2026-07-06, feasibility test — details in fixes.md):** INFEASIBLE
+as built. With every mitigation applied (GP-primed windows, log-uniform
+amplitude, 200k-call cap per stage), one system cost 5.4 h, both stages hit
+the cap, and the delay returned bound-pinned with zero-width errors. Root
+cause: SNTD's 0.1-day phase-rounding likelihood plateau, unfixable repo-side
+for joint series/color sampling at these SNRs. **Forward path (unbuilt):**
+keep the BayeSN SED but fit through SNTD's *parallel* method (per-image fits,
+as in Path A), which avoids the joint-sampling degeneracy.
 
 ### 4.4 Routing policy (which path, which mode)
 
@@ -462,8 +518,9 @@ payloads.
 GP quality == good      → SALT fast (GP-primed)          ~seconds–minute
 GP quality == broad     → SALT robust                     ~minutes
 GP quality == multipeak → SALT robust; flag for BayeSN
-high-value systems      → BayeSN two-stage (GP-primed)    ~minutes–tens of min
-(e.g. best H0 leverage, microlensing candidates from Stage 2)
+high-value systems      → BayeSN-parallel (GP-primed)     [unbuilt — see §4.3
+(e.g. best H0 leverage, microlensing candidates)           verdict: two-stage
+                                                           route closed]
 ```
 
 The residual distribution *between* fast and robust on the same systems is

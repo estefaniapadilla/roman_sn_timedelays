@@ -16,6 +16,16 @@ git clone https://github.com/bayesn/bayesn && pip install -e ./bayesn   # 0.4.1 
 conda env create -f envs/roman_ml.yml
 ```
 
+## roman_ml usage note
+
+Always run via activation (`conda activate roman_ml` or
+`conda run -n roman_ml ...`) — never call its `bin/python` directly.
+The env sets `LD_LIBRARY_PATH` on activation so pip-installed torch loads
+the env's libstdc++ instead of the (older) system one; bypassing
+activation resurfaces `CXXABI_1.3.15 not found` on `import torch` +
+scipy. Also: create envs with `--solver=libmamba` (the classic solver
+took hours on this machine).
+
 ## Rules
 
 - Never `pip/conda install` into `sntd_bayesn` — its numpy<2 / sntd / slsim
