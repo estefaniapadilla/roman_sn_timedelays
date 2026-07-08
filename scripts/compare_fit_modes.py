@@ -1,12 +1,16 @@
 """
 compare_fit_modes.py
 =====================
-Head-to-head comparison of the three delay-measurement methods on the SAME
+Head-to-head comparison of the four delay-measurement methods on the SAME
 lens systems (inner join on lens_index + image):
 
-  GP cross-correlation  scripts/gp_benchmark.ecsv             (wall_time_s)
-  SALT fast             scripts/delay_benchmark_fast.ecsv     (fit_time_s)
-  SALT robust           scripts/delay_benchmark_robust.ecsv   (fit_time_s)
+  GP cross-correlation  gp_only_benchmark.ecsv       (wall_time_s)
+  GP+samp (primed fit)  delay_benchmark_gp.ecsv      (fit_time_s + gp_time_s)
+  SALT fast             delay_benchmark_fast.ecsv    (fit_time_s)
+  SALT robust           delay_benchmark_robust.ecsv  (fit_time_s)
+
+All files are found via roman_td.paths.find_benchmark (outputs/benchmarks/,
+with a legacy scripts/ fallback).
 
 All three used identical simulations (same per-lens seed), so differences
 are attributable to the method alone. "GP (good)" is the GP restricted to
@@ -33,7 +37,8 @@ FIGDIR = os.path.join(os.path.dirname(HERE), "figures")
 os.makedirs(FIGDIR, exist_ok=True)
 
 # Fixed color per method (validated categorical palette; never reassigned)
-COLORS = {"GP": "#2a78d6", "fast": "#eda100", "robust": "#1baf7a"}
+COLORS = {"GP": "#2a78d6", "GP+samp": "#8250c4", "fast": "#eda100",
+          "robust": "#1baf7a"}
 TEXT, MUTED = "#1a1a19", "#6b6a60"
 
 
@@ -43,24 +48,29 @@ def load():
     sys.path.insert(0, os.path.join(HERE, ".."))
     from roman_td.paths import find_benchmark
     gp = Table.read(find_benchmark("gp_only_benchmark.ecsv"))
+    gps = Table.read(find_benchmark("delay_benchmark_gp.ecsv"))
     fast = Table.read(find_benchmark("delay_benchmark_fast.ecsv"))
     rob = Table.read(find_benchmark("delay_benchmark_robust.ecsv"))
 
     def key(t):
         return {(int(r["lens_index"]), str(r["image"])): r for r in t}
 
-    kg, kf, kr = key(gp), key(fast), key(rob)
-    common = sorted(set(kg) & set(kf) & set(kr))
+    kg, ks, kf, kr = key(gp), key(gps), key(fast), key(rob)
+    common = sorted(set(kg) & set(ks) & set(kf) & set(kr))
 
     rows = []
     for k in common:
-        g, f, r = kg[k], kf[k], kr[k]
+        g, s, f, r = kg[k], ks[k], kf[k], kr[k]
         rows.append({
             "lens_index": k[0], "image": k[1],
             "true_delay": float(g["true_delay"]),
-            "res_GP": float(g["residual"]), "res_fast": float(f["residual"]),
+            "res_GP": float(g["residual"]),
+            "res_GP+samp": float(s["residual"]),
+            "res_fast": float(f["residual"]),
             "res_robust": float(r["residual"]),
-            "t_GP": float(g["wall_time_s"]), "t_fast": float(f["fit_time_s"]),
+            "t_GP": float(g["wall_time_s"]),
+            "t_GP+samp": float(s["fit_time_s"]) + float(s["gp_time_s"]),
+            "t_fast": float(f["fit_time_s"]),
             "t_robust": float(r["fit_time_s"]),
             "gp_quality": str(g["quality"]),
         })
@@ -81,18 +91,20 @@ def stats(res, t):
 
 def main():
     tab = load()
-    print(f"Common systems across all three benchmarks: {len(tab)}")
+    print(f"Common systems across all four benchmarks: {len(tab)}")
 
-    methods = ["GP", "fast", "robust"]
+    methods = ["GP", "GP+samp", "fast", "robust"]
     S = {m: stats(np.asarray(tab[f"res_{m}"]), np.asarray(tab[f"t_{m}"]))
          for m in methods}
     good = tab[tab["gp_quality"] == "good"]
-    S["GP (good)"] = stats(np.asarray(good["res_GP"]), np.asarray(good["t_GP"]))
+    for m in ("GP", "GP+samp"):
+        S[f"{m} (good)"] = stats(np.asarray(good[f"res_{m}"]),
+                                 np.asarray(good[f"t_{m}"]))
 
-    print(f"\n{'method':<10} {'n':>4} {'median':>8} {'P68|res|':>9} "
+    print(f"\n{'method':<15} {'n':>4} {'median':>8} {'P68|res|':>9} "
           f"{'<2d':>6} {'<5d':>6} {'med time':>9}")
     for m, s in S.items():
-        print(f"{m:<10} {s['n']:>4} {s['median']:>+7.2f}d {s['p68']:>8.2f}d "
+        print(f"{m:<15} {s['n']:>4} {s['median']:>+7.2f}d {s['p68']:>8.2f}d "
               f"{s['lt2']:>5.0f}% {s['lt5']:>5.0f}% {s['t_med']:>8.1f}s")
 
     # ── figure ──────────────────────────────────────────────────────────
