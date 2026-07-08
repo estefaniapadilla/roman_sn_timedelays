@@ -45,7 +45,8 @@ warnings.filterwarnings("ignore")
 from roman_td.paths import DATA_DIR, TRAINING_DIR
 from roman_td.bayesn_wrapper import ensure_registered, usable_bands, _to_builtin
 from roman_td.simulate import (lens_truth, simulate_photometry,
-                               DEFAULT_DEPTH_5SIG, SURVEY_BANDS)
+                               SURVEY_BANDS, SURVEY_CADENCE,
+                               SURVEY_DEPTH_5SIG)
 from roman_td.crosscorr import gp_cross_correlate
 
 REPO_ROOT = os.path.join(os.path.dirname(__file__), "..")
@@ -85,8 +86,11 @@ def process_one_lens(i, lens, args, bayesn_yaml, filters_yaml):
     index_rows = []
     for r in range(args.realizations):
         rng = np.random.default_rng(args.seed + i * 1000 + r + 1)
+        cadence = (args.cadence if args.cadence is not None
+                   else SURVEY_CADENCE[args.survey])
+        depths = SURVEY_DEPTH_5SIG[args.survey]
         tab, sim_info = simulate_photometry(
-            truth, bands_ok, args.cadence, DEFAULT_DEPTH_5SIG, rng,
+            truth, bands_ok, cadence, depths, rng,
             sn_params=sn_params)
         if tab is None:
             continue
@@ -126,8 +130,8 @@ def process_one_lens(i, lens, args, bayesn_yaml, filters_yaml):
                           "amplitude": sim_info["amplitude"],
                           "t0": tk["t0"]},
             "sim_config": {"survey": args.survey, "bands": bands_ok,
-                           "cadence": args.cadence,
-                           "depths": {b: DEFAULT_DEPTH_5SIG[b] for b in bands_ok},
+                           "cadence": cadence,
+                           "depths": {b: depths[b] for b in bands_ok},
                            "seed": args.seed, "sim_model": "bayesn"},
             "gp": gp_block,
         }
@@ -161,7 +165,9 @@ def main():
                     help="lens systems to attempt (0 = whole population)")
     ap.add_argument("--realizations", type=int, default=3,
                     help="noise realizations per lens (same SN)")
-    ap.add_argument("--cadence", type=float, default=5.0)
+    ap.add_argument("--cadence", type=float, default=None,
+                    help="flat cadence override (days); default = per-filter "
+                         "CCS spec (SURVEY_CADENCE[--survey])")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--n_jobs", type=int, default=8)
     args = ap.parse_args()

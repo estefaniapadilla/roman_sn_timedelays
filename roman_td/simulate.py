@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import numpy as np
 import astropy.table as at
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Union
 
 # ZP=27.0 matches the BayeSN amplitude convention
 ZP = 27.0
@@ -42,6 +42,40 @@ IMG_LABELS = list("abcdefgh")
 SURVEY_BANDS: Dict[str, List[str]] = {
     "time_domain_wide": ["F062", "F087", "F106", "F129", "F158"],
     "time_domain_deep": ["F087", "F106", "F129", "F158", "F184"],
+}
+
+# Roman HLTDS Core Community Survey imaging cadence (days), per tier:
+# one anchor filter every 5 d; the rest every other visit (10 d).
+SURVEY_CADENCE: Dict[str, Dict[str, float]] = {
+    "time_domain_wide": {"F062": 5.0, "F087": 10.0, "F106": 10.0,
+                         "F129": 10.0, "F158": 10.0},
+    "time_domain_deep": {"F087": 5.0, "F106": 10.0, "F129": 10.0,
+                         "F158": 10.0, "F184": 10.0},
+}
+
+# WFI imaging sensitivity: 5-sigma AB point-source depth in 1 hour, from the
+# Roman Technical Information Repository (2026 values — ~0.5 mag shallower
+# than the 2021 WFI Reference Information PDF).
+WFI_SENS_1HR: Dict[str, float] = {
+    "F062": 27.97, "F087": 27.63, "F106": 27.60, "F129": 27.60,
+    "F158": 27.52, "F184": 26.95, "F213": 25.64, "F146": 28.01,
+}
+
+# HLTDS CCS total exposure time per visit (s), same source as SURVEY_CADENCE.
+SURVEY_EXPTIME: Dict[str, Dict[str, float]] = {
+    "time_domain_wide": {"F062": 60, "F087": 85, "F106": 95,
+                         "F129": 152, "F158": 294},
+    "time_domain_deep": {"F087": 193, "F106": 294, "F129": 307,
+                         "F158": 420, "F184": 1636},
+}
+
+# Per-visit 5-sigma depths, background-limited scaling from the 1-hour
+# sensitivity: m5(t) = m5(1hr) - 1.25 log10(3600/t). Ignores read noise, so
+# the shortest wide exposures are slightly optimistic.
+SURVEY_DEPTH_5SIG: Dict[str, Dict[str, float]] = {
+    tier: {b: round(WFI_SENS_1HR[b] - 1.25 * np.log10(3600.0 / t), 2)
+           for b, t in exps.items()}
+    for tier, exps in SURVEY_EXPTIME.items()
 }
 
 # Approximate per-visit 5-sigma AB depths for the Roman HLTDS tiers,
@@ -151,7 +185,7 @@ def set_amplitude_for_distance(model, zS: float, band: str) -> None:
 def simulate_photometry(
     truth: Dict[str, Any],
     bands: List[str],
-    cadence_days: float,
+    cadence_days: Union[float, Dict[str, float]],
     depths: Dict[str, float],
     rng: np.random.Generator,
     sn_params: Optional[Dict[str, float]] = None,
@@ -160,6 +194,10 @@ def simulate_photometry(
 
     Draws a random BayeSN realisation (theta, hostebv) and scales it to the
     correct distance, then adds Gaussian flux noise from the depth map.
+
+    ``cadence_days`` may be a single number (all bands share one grid) or a
+    per-band dict (SURVEY_CADENCE[tier]) — the HLTDS observes one anchor
+    filter every 5 d and the others every other visit (10 d).
 
     Returns
     -------
@@ -196,9 +234,15 @@ def simulate_photometry(
 
     # Cover the full window: from before image-1 rises to after the most
     # delayed image fades. The +10 day buffers ensure we catch the tails.
-    span_lo = t0 + model.mintime() - 10
-    span_hi = t0 + model.maxtime() + delays[-1] + 10
-    mjds = np.arange(span_lo, span_hi, cadence_days)
+    # model.mintime()/maxtime() already include t0 (sncosmo convention)
+    span_lo = model.mintime() - 10
+    span_hi = model.maxtime() + delays[-1] + 10
+    if isinstance(cadence_days, dict):
+        band_mjds = {b: np.arange(span_lo, span_hi, float(cadence_days[b]))
+                     for b in bands}
+    else:
+        _grid = np.arange(span_lo, span_hi, float(cadence_days))
+        band_mjds = {b: _grid for b in bands}
 
     rows = []
     kept_images, kept_delays, kept_mu = [], [], []
@@ -207,10 +251,11 @@ def simulate_photometry(
         img_rows = []
         max_snr = 0.0
         for b in bands:
+            mjds = band_mjds[b]
             ferr = 10 ** (-0.4 * (depths[b] - ZP)) / 5.0
             phase_ok = (
-                ((mjds - t0 - dt) >= model.mintime()) &
-                ((mjds - t0 - dt) <= model.maxtime())
+                ((mjds - dt) >= model.mintime()) &
+                ((mjds - dt) <= model.maxtime())
             )
             t_obs = mjds[phase_ok]
             if len(t_obs) == 0:
