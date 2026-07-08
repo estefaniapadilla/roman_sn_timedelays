@@ -49,7 +49,7 @@ def run_epoch(model, loader, opt=None):
             bs = len(batch["dt"])
             n += bs
             for k, v in parts.items():
-                totals[k] = totals.get(k, 0.0) + float(v) * bs
+                totals[k] = totals.get(k, 0.0) + float(v.detach()) * bs
     return {k: v / n for k, v in totals.items()}
 
 
@@ -81,6 +81,11 @@ def main():
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--gp_dropout", type=float, default=0.2)
+    ap.add_argument("--crop_prob", type=float, default=0.0,
+                    help="P(random observer-window crop) per train example; "
+                         "0 = full curves (original behavior)")
+    ap.add_argument("--crop_window", type=float, default=365.0,
+                    help="observing-window length for crops (days)")
     ap.add_argument("--l_max", type=int, default=512)
     ap.add_argument("--patience", type=int, default=20,
                     help="early stop after this many epochs w/o val improvement")
@@ -98,7 +103,8 @@ def main():
 
     tr = LensedSNDataset(args.data, "train", l_max=args.l_max,
                          gp_dropout=args.gp_dropout, seed=args.seed,
-                         limit=args.limit)
+                         limit=args.limit, crop_prob=args.crop_prob,
+                         crop_window_days=args.crop_window)
     va = LensedSNDataset(args.data, "val", l_max=args.l_max,
                          gp_dropout=0.0, limit=args.limit)
     print(f"train {len(tr)}  val {len(va)}  (data: {args.data})")
