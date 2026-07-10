@@ -3,8 +3,17 @@
 Major bugs and their fixes, newest first. One line each — details live in
 git history. Add a row when a bug costs > 1 hour or changes results.
 
+## Pending (known, NOT yet applied — one per retrain, compare runs: v3 = a+b, v4 = a+b+c)
+
+| # | Problem | Planned fix | Files |
+|---|---|---|---|
+| (b) | GP hint slots misaligned: `scalar_features` iterates `per_image` incl. the reference at slot 0 → hints shifted one slot vs dt targets (= images[1:]); quad's 4th-image hint silently dropped | Skip the ref entry so hint slot s = target slot s | `tokenize.py` |
+| (c) | `best.pt` + early stop keyed on val_total, dominated by trivial heads (micro zeros, theta, dust) — delay head barely moves it | Select/early-stop on val_dt (or weighted total) | `train_transformer.py` |
+| (d) | Heteroscedastic NLL can still stall via σ inflation (residual risk after DT_SCALE) | Optional: freeze log σ for first ~5 epochs, or β-NLL. Only if (b)+(c) plateau above GP level | `transformer.py`/`train_transformer.py` |
+
 | Date | Problem | Root cause | Fix | Files |
 |---|---|---|---|---|
+| 07-09 | Transformer delay head useless (val P68 ≈ 40 d vs 1.9 d from just copying the GP hint; predict-zero = 51 d) in deep_full_v1/deep_crop_v1 | dt targets + dt_gp(_err) hints fed as raw days (pop std 129 d) → heteroscedastic NLL inflates σ (p90 = 234 d), mean-gradient ∝ 1/σ² stalls; predictions collapsed to std 12 d | `DT_SCALE = 100`: targets and hints stored as days/100, metrics ×100 back to days. Retrain = v2 runs | `tokenize.py`, `ml_data.py`, `train_transformer.py` |
 | 07-07 | **BayeSN sim (Path B) evaluated the SED ~60,000 d after peak** — every flux in the tier1 training set (384 examples) is wild model extrapolation, some bands 10³⁰× too bright; smoke + tier1_v1 transformer runs trained on garbage. Benchmarks unaffected (Path A/lenstronomy) | `span_lo = t0 + model.mintime()` double-counts t0 (sncosmo min/maxtime already include t0); the phase cut compared relative phase to absolute time, masking the crash | Span = model time range directly; phase cut on `mjd − dt` vs model range. Verified: peak mags 24–26, image peaks at t0+dt, GP recovers delays | `simulate.py` |
 | 07-07 | Sims too optimistic vs HLTDS spec: every filter at 5 d — HLTDS spec is one anchor filter at 5 d + rest at 10 d (per tier) → existing benchmarks/training set have ~2× too many points in the 10-day filters (optimistic) | Simulator had a single global cadence; per-filter CCS spec not yet encoded | `SURVEY_CADENCE` + `SURVEY_EXPTIME` + `SURVEY_DEPTH_5SIG` in `simulate.py` (depths from CCS exposure times × WFI 1-hr sensitivities, m5 − 1.25·log₁₀(3600/t)); `simulate_photometry` takes per-band cadences; builder uses per-tier spec by default | `simulate.py`, `build_training_set.py` |
 | 07-06 | **Verdict: BayeSN two-stage INFEASIBLE** — even with every mitigation (GP-primed windows, log-uniform amplitude, 200k-call cap), one system took 5.4 h, both stages hit the cap, and the delay came back pinned at the −30 d window bound (true +9.78 d) with zero-width errors | Plateau pathology (below) survives all repo-side mitigations at these SNRs | Abandon series/color route; forward path = BayeSN SED via SNTD **parallel** method (unbuilt) | (verdict — docs only) |

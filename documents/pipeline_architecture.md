@@ -1,567 +1,369 @@
-# Lensed SN Ia Time-Delay Pipeline — Architecture Specification Fable
+# Lensed SN Ia Time-Delay Pipeline — Architecture Specification
 
 Companion to `lensed_sn_pipeline_design.md` (the *why*). This document is the
-*how*: for every stage, the exact inputs, the treatment applied to them, the
-outputs, and the contract by which each stage feeds the next. Where a component
-already exists in this repository, the real module/function is named; where it
-does not, the section is marked **[TO BUILD]** and specified precisely enough
-to implement without further design decisions.
+*how*: what each stage takes in, what it does, what it writes, and how the
+pieces connect. **Last updated 2026-07-09.** Status markers: **BUILT** (code
+exists, has run, results on disk) / **UNBUILT** (specified only).
 
-Repository layout assumed throughout:
+Deep dives live in their own docs and are not repeated here:
+`transformer_explained.md` (design), `transformer_training_explained.md`
+(how it learns), `gbt_baseline_explained.md`, `fixes.md` (bug ledger +
+pending fixes).
+
+## Repository map (all files exist)
 
 ```
 time_delays/
-├── data/                       # slsim population pickles
-├── roman_td/                   # reusable library code
-│   ├── sntd_wrapper.py         # Stage 3 (SALT path)   — EXISTS
-│   ├── bayesn_wrapper.py       # Stage 3 (BayeSN path) — EXISTS
-│   ├── simulate.py             # Stage 0 (BayeSN sim)  — EXISTS
-│   ├── crosscorr.py            # Stage 1 (GP)          — STUB, TO BUILD
-│   ├── bayesncosmo.py          # BayeSN sncosmo source — EXISTS
-│   ├── tokenize.py             # Stage 2 input prep    — TO BUILD
-│   └── transformer.py          # Stage 2 model         — TO BUILD
-├── scripts/                    # population drivers
-│   ├── run_sntd_population.py      # EXISTS
-│   ├── run_bayesn_population.py    # EXISTS
-│   ├── run_gp_population.py        # TO BUILD
-│   ├── build_training_set.py       # TO BUILD
-│   └── train_transformer.py        # TO BUILD
-└── documents/
+├── data/                            # slsim lens population pickles (input of everything)
+├── roman_td/                        # library
+│   ├── simulate.py                  # Stage 0: BayeSN sim + HLTDS survey spec
+│   ├── crosscorr.py                 # Stage 1: GP cross-correlation
+│   ├── tokenize.py                  # Stage 2: tokens + scalar features (+ DT_SCALE)
+│   ├── ml_data.py                   # Stage 2: PyTorch Dataset (+ crop augmentation)
+│   ├── transformer.py               # Stage 2: model + loss
+│   ├── sntd_wrapper.py              # Stage 3: SALT path (+ Path-A sim)
+│   ├── bayesn_wrapper.py            # Stage 3: BayeSN two-stage (INFEASIBLE — kept for record)
+│   ├── bayesncosmo.py               # BayeSN as an sncosmo source
+│   └── paths.py                     # repo-relative output paths
+├── scripts/
+│   ├── run_sntd_population.py       # benchmark driver: SALT fast/robust
+│   ├── run_gp_population.py         # benchmark driver: GP alone / GP-primed SALT
+│   ├── run_bayesn_population.py     # benchmark driver: BayeSN (feasibility record)
+│   ├── compare_fit_modes.py         # four-way comparison plots/table
+│   ├── build_training_set.py        # Stage 0+1 → training examples on disk
+│   ├── train_transformer.py         # Stage 2 training driver
+│   └── gbt_baseline.py              # boring baseline (GBT on GP features)
+└── outputs/
+    ├── benchmarks/*.ecsv            # one row per (system, image): fitted vs true
+    ├── training/tier1_{deep,wide}/  # training sets (spec-consistent, post-fixes)
+    └── models/<run_name>/           # best.pt + config.json + history.csv per run
 ```
+
+Environments: simulation/fitting/building run in `sntd_bayesn`
+(`/home/epadill/miniconda3/envs/sntd_bayesn/bin/python`); ML training runs in
+`roman_ml` (torch). The two never mix: `build_training_set.py` needs the
+fitting stack, `train_transformer.py` only torch+numpy+astropy.
 
 ---
 
-## 0. The pipeline at a glance
+## 0. How the pieces connect — the three chains
+
+The four stages (0 sim, 1 GP, 2 transformer, 3 physical fit) are wired into
+three concrete chains. Two run today; the third is the assembled product.
+
+### Chain A — benchmark chain (BUILT, results on disk)
+
+*Question it answers: how accurate/fast is each classical method?*
 
 ```
-                         ┌─────────────────────────────────────────────┐
-                         │ Stage 0 · SIMULATION                        │
-                         │ slsim pickle → photometry + truth labels    │
-                         └──────┬──────────────────────────┬───────────┘
-                                │ photometry table         │ truth labels
-                                ▼                          │ (training only)
-                         ┌─────────────────┐               │
-                         │ Stage 1 · GP    │               │
-                         │ cross-correlate │               │
-                         └──────┬──────────┘               │
-             coarse Δt ± σ,     │                          │
-             flux ratio,        │                          │
-             quality flag       │                          │
-                                ▼                          ▼
-                         ┌──────────────────────────────────────┐
-                         │ Stage 2 · TRANSFORMER                │
-                         │ tokens + GP hints → refined Δt, μ,   │
-                         │ microlensing, SN params (each ± σ)   │
-                         └──────┬───────────────────────────────┘
-             tight t0/dt bounds │
-             + parameter priors ▼
-                         ┌──────────────────────────────────────┐
-                         │ Stage 3 · PHYSICAL FIT (SNTD)        │
-                         │ SALT fast/robust  or  BayeSN 2-stage │
-                         └──────┬───────────────────────────────┘
-                                ▼
-                         benchmark table + posteriors
-                         (publication-grade Δt, μ ratios)
+data/*.pkl ─▶ run_sntd_population.py ──▶ outputs/benchmarks/delay_benchmark_{fast,robust}.ecsv
+data/*.pkl ─▶ run_gp_population.py  ──▶ outputs/benchmarks/gp_only_benchmark.ecsv
+        (same script, --fit flag) ────▶ outputs/benchmarks/delay_benchmark_gp.ecsv  (GP-primed SALT)
+                                                  │
+                          compare_fit_modes.py ◀──┘   (four-way table + plots)
 ```
 
-Every arrow is a **data contract** defined in §6. The stages are deliberately
-decoupled: Stage 3 runs today without Stages 1–2 (that is the current state of
-the repo); Stage 1 improves Stage 3 without any ML; Stage 2 is the accelerant
-added last.
+Measured (185 common systems, pre-spec cadence — internally consistent,
+optimistic vs HLTDS spec):
+
+| method | delay P68 | wall time / system |
+|---|---|---|
+| GP alone | 2.01 d (good subset 1.65 d) | 4 s |
+| GP-primed SALT fast | 1.48 d (good subset 1.37 d) | ~270 s |
+| SALT fast (unprimed) | 1.88 d | ~260 s |
+| SALT robust | 1.14 d | ~3300 s |
+
+Provisional GP bar on spec-realistic sims (42-example check): P68 2.17 d all,
+**1.43 d on `good`** — the number Stage 2 must beat; to be re-measured on the
+full deep build.
+
+### Chain B — ML training chain (BUILT, runs in progress)
+
+*Question it answers: can a network match/beat the above in milliseconds?*
+
+```
+data/roman_deep*.pkl ─▶ build_training_set.py          (env: sntd_bayesn)
+                          │  per lens: Stage-0 sim (§1) → detection cuts
+                          │            Stage-1 GP (§2) on each noise realization
+                          ▼
+        outputs/training/tier1_deep/tier1/
+            index.ecsv                      (one row per example: split, gp_ok, paths)
+            lens_XXXXX_rY__phot.ecsv        (photometry, canonical schema §6.1)
+            lens_XXXXX_rY__truth.json       (truth + GP result, §6.2–6.3)
+                          │
+                          ▼
+        train_transformer.py --name <run>   (env: roman_ml)
+            reads examples via roman_td/ml_data.py + tokenize.py
+            (same tokenizer code that inference will use — no train/serve skew)
+                          ▼
+        outputs/models/<run>/best.pt + history.csv + config.json
+```
+
+Data on disk: `tier1_deep` = 8,286 examples / 2,762 systems (3 noise
+realizations each; splits by lens system 6657/879/750), `tier1_wide` =
+5,055 / 1,685. (`outputs/training/tier1` is the pre-fix set — invalid, see
+fixes.md t0 bug.) Runs so far: `deep_full_v1`/`deep_crop_v1` (07-08, delay
+head stalled — units bug, fixed by `DT_SCALE`), `deep_full_v2`/`deep_crop_v2`
+(07-09, in progress, stall resolved). Pending one-at-a-time fixes (b)(c)(d):
+see fixes.md "Pending".
+
+### Chain C — inference chain (the product; wiring UNBUILT)
+
+*What runs on real (or held-out) data once assembled:*
+
+```
+photometry ─▶ Stage 1 GP ─▶ Stage 2 transformer ─▶ routing (§4.4) ─▶ Stage 3 SNTD
+                 hints         fast catalog:            quality-based      publication-grade
+                 + windows     Δt, μ, micro, ±σ         fast/robust        Δt posteriors
+```
+
+Every stage exists; what's missing is the driver that chains them and the
+post-training calibration pass (§5.2). Stage 2's output is the catalog for
+*all* systems; Stage 3 runs on the subset worth CPU-hours, started inside
+Stage 2's tight windows.
 
 ---
 
-## 1. Stage 0 — Simulation (photometry + truth generation)
+## 1. Stage 0 — Simulation (BUILT: `roman_td/simulate.py`)
 
-### 1.1 Purpose
+**Purpose:** per lens system, (a) a realistic multi-image multi-band Roman
+photometry table, (b) truth labels (delays, magnifications, micro curves, SN
+parameters). (a) feeds Stages 1–3; (a)+(b) feed training and every benchmark.
 
-Produce, per lens system: (a) a realistic multi-image, multi-band Roman
-photometry table, and (b) the ground-truth labels (delays, magnifications,
-microlensing curves, SN parameters). The photometry feeds Stages 1–3; the
-labels feed transformer training (Stage 2) and every benchmark.
+**Inputs:** slsim lens pickle (provides redshifts, `point_source_arrival_times()`,
+`point_source_magnification()`); survey tier; RNG seed
+(`default_rng(seed + lens_index)` — reproducible, worker-independent).
 
-### 1.2 Inputs
+**Two simulators:**
+- **Path A (SALT):** `sntd_wrapper.extract_light_curves()` — lenstronomy
+  ray-traced lensed magnitudes; used by the Chain-A benchmarks.
+- **Path B (BayeSN):** `simulate.simulate_photometry()` — draw one BayeSN SN
+  (`theta~N(0,1)`, `hostebv~Exp(0.1)`, amplitude set for luminosity distance),
+  then per image k: `mu_k · bandflux(band, t − dt_k)` + depth-map noise.
+  Used by Chain B (the training set).
 
-| Input | Type / location | Notes |
-|---|---|---|
-| Lens population | `data/roman_*_lens_population_compat.pkl` — dict with key `"lens_population"`, a list of slsim lens objects | Each lens object provides `source_redshift_list`, `deflector_redshift`, `point_source_arrival_times()`, `point_source_magnification()`, `point_source_magnitude(band, lensed, time)` |
-| Survey config | `SURVEY_BANDS` in `roman_td/simulate.py` | `time_domain_deep`: F087–F184; `time_domain_wide`: F062–F158 |
-| Depths | `DEFAULT_DEPTH_5SIG` (per-band 5σ AB mag). Two variants exist: `simulate.py` (Hounsell+2018 wide-tier scaling) and `sntd_wrapper.py` (lenstronomy deep-tier). **Use the one matching the survey tier and record which was used in the output.** |
-| Cadence | days between visits (default 5.0) |
-| RNG seed | `np.random.default_rng(seed + lens_index)` — per-system seeding so runs are reproducible and workers independent |
+**Detection cuts (Path B):** image kept iff peak SNR ≥ 5 and ≥ 5 epochs;
+system kept iff ≥ 2 images survive. Kept delays re-zeroed to the first kept
+image — downstream must always use the truth record's `images` list, never
+assume `image_1`. Yield vs spec depths: ~27% of deep, ~17% of wide systems
+detectable — physics (demagnified counter-images at high z), not cut tuning.
 
-### 1.3 Treatment — two existing simulators, one planned extension
+**HLTDS Core Community Survey spec (encoded 2026-07-07):** per-tier anchor
+filter every 5 d + four filters every 10 d; per-visit 5σ depths from CCS
+exposure times × WFI 1-hr sensitivities, m5(t) = m5(1hr) − 1.25·log₁₀(3600/t).
+In `simulate.SURVEY_CADENCE` / `SURVEY_EXPTIME` / `SURVEY_DEPTH_5SIG`;
+`build_training_set.py` uses these by default (`--cadence` = flat override
+for controlled experiments). Legacy `DEFAULT_DEPTH_5SIG` dicts remain in
+`simulate.py`/`sntd_wrapper.py` for the old benchmarks only.
 
-**Path A (SALT pipeline sim): `sntd_wrapper.extract_light_curves()`**
-1. Query `lens.point_source_arrival_times()` → true arrival time per image.
-2. For each band, call `lens.point_source_magnitude(band, lensed=True,
-   time=obs_times)` — lenstronomy ray-tracing gives the *lensed* magnitude of
-   each image at each epoch. This call dominates runtime (~80 calls per band
-   at 5-day cadence over 400 days).
-3. Convert mags to flux at `ZP = 25.0` (AB), add Gaussian noise with
-   σ = flux(depth_5σ)/5 per band.
-4. Drop non-finite epochs; keep an image only if it has data; record its peak
-   SNR.
+| Tier | 5-d anchor | 10-d filters | depths (anchor first) |
+|---|---|---|---|
+| Wide | F062 | F087 F106 F129 F158 | 25.75 / 25.60 25.63 25.88 26.16 |
+| Deep | F087 | F106 F129 F158 F184 | 26.04 / 26.24 26.26 26.35 26.52 |
 
-**Path B (BayeSN sim): `simulate.simulate_photometry()`**
-1. Take `truth = lens_truth(lens)` (redshifts, delays, macro-μ per image).
-2. Draw one BayeSN realization: `theta ~ N(0,1)`, `hostebv ~ min(Exp(0.1), 1)`,
-   `hostr_v = 3.1`; scale amplitude to the correct luminosity distance via
-   `set_amplitude_for_distance()` (peak M_B = SIM_MB, FlatLambdaCDM H0=70).
-3. For each image k: evaluate `mu_k * model.bandflux(band, t − dt_k)` on the
-   cadence grid, add Gaussian noise from the depth map.
-4. **Detection cut:** an image is kept only if peak SNR ≥ 5 *and* it has ≥ 5
-   observations. A system is kept only if ≥ 2 images survive.
-5. **Delay re-referencing:** kept delays are re-zeroed to the first *kept*
-   image (`kept_delays −= kept_delays[0]`) — the reference image after cuts is
-   not necessarily slsim's image 1. Every downstream consumer must use the
-   `images` list from `sim_info["truth"]`, never assume `image_1`.
+**Everything simulated before 2026-07-07 is NOT spec-consistent** (flat 5-d
+cadence, 0.6–1.5 mag too deep; Path B additionally had the t0 double-count
+bug — see fixes.md). Chain-A benchmarks are internally valid but optimistic.
 
-**HLTDS imaging spec (Core Community Survey, added 2026-07-07)** — encoded
-in `simulate.SURVEY_BANDS` / `simulate.SURVEY_CADENCE`; the training-set
-builder uses these per-filter cadences by default (`--cadence` = flat
-override for controlled experiments):
-
-| Tier | Filters | Cadence |
-|---|---|---|
-| Wide | F062 | 5 d |
-| Wide | F087, F106, F129, F158 | 10 d |
-| Deep | F087 | 5 d |
-| Deep | F106, F129, F158, F184 | 10 d |
-
-Each tier = one anchor filter every 5-day visit + four filters every other
-visit. Per-visit 5σ depths (`SURVEY_DEPTH_5SIG`) are derived from the CCS
-exposure times and the WFI 1-hour sensitivities (Roman Technical Information
-Repository, 2026) via background-limited scaling m5(t) = m5(1hr) −
-1.25·log₁₀(3600/t):
-
-| Tier | F062 | F087 | F106 | F129 | F158 | F184 |
-|---|---|---|---|---|---|---|
-| Wide (t_exp s) | 25.75 (60) | 25.60 (85) | 25.63 (95) | 25.88 (152) | 26.16 (294) | — |
-| Deep (t_exp s) | — | 26.04 (193) | 26.24 (294) | 26.26 (307) | 26.35 (420) | 26.52 (1636) |
-
-**Everything simulated before 2026-07-07 is NOT spec-consistent** (see
-fixes.md): flat 5-day cadence in all filters, depths 0.6–1.5 mag too deep,
-and Path B additionally had the t0 double-count bug (fluxes were model
-extrapolation ~60,000 d past peak → tier1 training set + first transformer
-runs invalid). Path A benchmarks are internally valid but optimistic
-relative to this spec.
-
-**Path C [TO BUILD]: microlensing + tier injection.** Neither existing path
-simulates microlensing (Path A's docstring states this explicitly — each image
-gets a *flat* macro magnification). The extension:
-
-1. For each image, draw a microlensing magnification map parameterized by the
-   local convergence κ, shear γ, and stellar mass fraction s at the image
-   position (available from the slsim macro-model; GERLUMPH-style maps or
-   `microlensing`-package equivalents).
-2. Convolve the map with the SN photosphere profile as a function of
-   wavelength and phase (photosphere radius grows ~v·t with v ≈ 10⁴ km/s;
-   effective radius is smaller in the blue). This produces, per image and per
-   band, a smooth time-varying chromatic magnification curve `μ_micro(t, band)`.
-3. Multiply into the flux *before* adding noise:
-   `f = μ_macro,k · μ_micro,k(t, band) · f_SN(t − dt_k, band)`.
-4. Store `μ_micro,k(t, band)` sampled on the observation grid as a truth label.
-
-**Tier structure** (one flag per system, drawn per-system so all tiers share
-the same lens population):
-
-| Tier | Effects present | Truth labels set to |
-|---|---|---|
-| 0 | SN only (μ = 1, Δt as given) | micro amplitude = 0 |
-| 1 | SN + macro | micro amplitude = 0 |
-| 2 | SN + macro + micro | true injected curves |
-| 3 | SN + macro + micro + milli | + subhalo perturbation (research-grade) |
-
-One network trains on all tiers; the tier flag is stored for curriculum
-scheduling and ablation analysis, **not** used as a network input.
-
-### 1.4 Outputs (the Stage-0 → downstream contract)
-
-Two artifacts per system, written by `scripts/build_training_set.py` [TO BUILD]:
-
-**(a) Photometry table** — canonical schema (§6.1). Note the two existing
-paths currently emit *different* schemas (Path A: per-image `OrderedDict` of
-tables with column `time`/`band`; Path B: one combined table with
-`mjd`/`filter`/`image`). §6.1 defines the canonical combined form; write thin
-adapters rather than changing the existing functions.
-
-**(b) Truth record** — one JSON per system (§6.2): redshifts, per-image
-delays/macro-μ re-referenced after detection cuts, drawn SN parameters,
-injected microlensing curves, tier flag, and the exact simulation config
-(depths used, cadence, seed) so any system is reproducible from its record.
-
-### 1.5 How it feeds the next stage
-
-- **Photometry table → Stage 1** directly (the GP needs nothing else).
-- **Photometry table + truth → Stage 2 training** (tokens from the table,
-  regression targets from the truth record).
-- **Truth → every benchmark** (Stages 1, 2, 3 all report residuals against it).
+**Path C — microlensing injection (UNBUILT, tier 2):** per image, draw a
+magnification map (κ, γ, s from the macro model), convolve with the growing
+chromatic SN photosphere → `μ_micro(t, band)`; multiply into the flux before
+noise; store the curve as a truth label. Tier flag per system: 0 = SN only,
+1 = +macro (current sets), 2 = +micro, 3 = +milli. One network trains on all
+tiers; the flag is for curriculum/ablation, never a network input.
 
 ---
 
-## 2. Stage 1 — GP cross-correlation (coarse Δt, no SN model)
+## 2. Stage 1 — GP cross-correlation (BUILT: `roman_td/crosscorr.py`)
 
-### 2.1 Purpose
+**Purpose:** model-free coarse Δt in ~4 s/system: GP-interpolate each image's
+light curve, cross-correlate pairs. Not built for accuracy — built to place
+Stage 3's search window and give Stage 2 hint features. Measured anyway at
+P68 = 2.01 d (§0 Chain A).
 
-A model-free delay estimator running in seconds: interpolate each image's
-light curve with a Gaussian process, cross-correlate image pairs, report a
-coarse Δt with uncertainty and a flux ratio. Its job is *not* accuracy — it is
-to place Stage 3's narrow search window reliably and to give Stage 2 a hint
-feature.
+**Algorithm** (per pair, reference = brightest image, per shared band):
+Matérn-3/2 GP per image (length scale bounded [3, 40] d) → evaluate on a
+0.5-d grid → inverse-variance-weighted correlation vs lag, **scored only
+where the bright parts (> 30% of peak) of both curves overlap** (flat
+baselines correlate spuriously) → parabolic peak refinement → uncertainty
+from 50 Cholesky posterior draws × bands (per-band scatter kept — chromatic
+disagreement is a microlensing indicator) → flux ratio from shifted GP peaks.
 
-### 2.2 Status
+**Quality flag** from draw scatter + rival peaks (never peak width — SN
+curves always correlate broadly): `good` (σ ≤ 5 d, single peak), `broad`,
+`multipeak` (secondary ≥ 80% of primary), `fail`.
 
-`roman_td/crosscorr.py` exists as a stub with the planned API already declared:
-
-```python
-result = gp_cross_correlate(tab, images, bands, lag_range=(-200, 200))
-```
-
-**[TO BUILD]** — implement to this spec.
-
-### 2.3 Inputs
-
-| Input | Source | Requirement |
-|---|---|---|
-| `tab` | Stage 0 canonical photometry table (§6.1) | ≥ 5 points per image in at least one shared band |
-| `images` | image labels present in `tab` | ≥ 2 |
-| `bands` | filters to use | only bands with data for *both* images of a pair contribute |
-| `lag_range` | search window, days | default (−200, +200); must exceed the population's max delay (current Stage-3 cut: `max_delay_days=150`) |
-
-### 2.4 Treatment (exact algorithm)
-
-Per image pair (reference = brightest image, matching `fit_system()`'s
-convention), per shared band:
-
-1. **GP fit per image per band.** Matérn-3/2 kernel on (t, flux) with the
-   photometric `fluxerr` as per-point white noise. Fit only the two kernel
-   hyperparameters (amplitude, length scale) by marginal-likelihood
-   maximization; bound the length scale to [3, 40] days so the GP cannot
-   collapse to noise-tracking or over-smooth the peak.
-2. **Evaluate** both GP means (and variances) on a common uniform grid
-   (0.5-day spacing) covering the union of both images' time spans.
-3. **Cross-correlate:** for each trial lag τ on the grid, compute the
-   inverse-variance-weighted correlation of GP_A(t) with GP_B(t − τ) over the
-   overlap region, using only grid points where *both* GP variances are below
-   a cutoff (i.e., don't correlate extrapolated regions). Record the
-   correlation curve C(τ).
-4. **Point estimate:** τ̂ = argmax C(τ), refined by parabolic interpolation of
-   the three grid points around the maximum.
-5. **Uncertainty:** draw N = 50 posterior sample curves from each GP, repeat
-   steps 3–4 per draw *and* per band; σ(Δt) = the standard deviation of τ̂
-   across draws × bands. The **per-band scatter is kept separately** — large
-   band-to-band disagreement is itself a chromatic (microlensing) indicator
-   and feeds the Stage-2 features.
-6. **Quality flag:** classify C(τ) as
-   - `good` — single peak and σ(Δt) ≤ 5 d (one cadence step)
-   - `broad` — single peak but σ(Δt) > 5 d or undefined
-   - `multipeak` — a secondary maximum within 20% of the primary (aliasing)
-   - `fail` — no significant peak (max C < 0.3) / insufficient overlap
-
-   Deliberately *not* based on the correlation peak's width: smooth SN light
-   curves always give a wide C(τ) peak, so width measures curve shape, not
-   estimate precision — the GP-draw scatter σ(Δt) is the honest precision.
-   Correlations are only evaluated at lags where the *bright* parts
-   (> 30% of peak) of both curves overlap; normalized correlation of two
-   flat zero-flux baselines is spuriously high and creates fake peaks at
-   extreme lags otherwise.
-7. **Flux ratio:** ratio of GP peak fluxes, per band, after shifting B by τ̂;
-   report the per-band values and their inverse-variance-weighted mean. This
-   is a *total* (macro × micro) magnification-ratio proxy.
-
-### 2.5 Outputs
-
-Per system (§6.3 for the schema): for each non-reference image, `dt_gp`,
-`dt_gp_err`, `dt_gp_per_band` (dict), `flux_ratio`, `flux_ratio_per_band`,
-`quality` flag; plus the reference image label and wall time.
-
-Driver: `scripts/run_gp_population.py` [TO BUILD] — same joblib pattern as
-the existing drivers, writes `gp_benchmark.ecsv` with fitted-vs-true columns
-so Stage 1 gets the same residual benchmark treatment as Stage 3.
-
-### 2.6 How it feeds the next stages
-
-- **→ Stage 3 (the priming handoff, the first real payoff):** convert
-  (`dt_gp`, `dt_gp_err`) into per-image t0 windows:
-  `t0_img ∈ t0_ref + dt_gp ± max(4·dt_gp_err, 10 d)`. Concretely, in
-  `measure_one()` this replaces the `sncosmo.fit_lc` self-recentering of
-  `fast` mode and sets `t0_window` per system instead of the fixed 30 d in
-  `FIT_PRESETS["fast"]`. For the BayeSN path it replaces the peak-offset
-  initialization of `dt_*` bounds in `fit_system()` (currently
-  `peak offset ± delay_window=40 d`).
-  **Routing rule:** `quality == good` → fast mode with the GP window;
-  `broad`/`multipeak`/`fail` → robust mode (wide bounds). The flag doubles as
-  a "hard system" marker in all downstream analysis.
-- **→ Stage 2:** `dt_gp`, `dt_gp_err`, `flux_ratio`, per-band delay scatter,
-  and the quality flag (one-hot) become per-system scalar features (§3.3).
-  The GP peak time of the *reference image* becomes the phase zero-point for
-  tokenization (§3.2 — this exact choice is load-bearing; see the warning).
+**Feeds:**
+- **→ Stage 3:** t0 window per image = `t0_ref + dt_gp ± max(4σ, 10 d)`,
+  replacing fast mode's self-recentering. This is the measured 1.88 → 1.48 d
+  improvement in Chain A — priming beats unprimed fast in both accuracy and
+  it's the routing anchor (§4.4).
+- **→ Stage 2:** `dt_gp`, `dt_gp_err` (as days/`DT_SCALE`, §3.3), flux
+  ratios, band scatter, quality one-hot become scalar features; the
+  *reference image's* GP peak time is the phase zero-point of tokenization.
 
 ---
 
-## 3. Stage 2 — Transformer (amortized inference)
+## 3. Stage 2 — Transformer (BUILT: `tokenize.py`, `ml_data.py`, `transformer.py`)
 
-### 3.1 Purpose
+**Purpose:** millisecond amortized inference — Δt, magnification ratios,
+microlensing descriptors, SN parameters, each with a learned σ — from raw
+photometry + Stage-1 hints. Full design rationale in `transformer_explained.md`;
+optimizer/loss mechanics in `transformer_training_explained.md`.
 
-Millisecond-scale prediction of Δt, magnification ratios, microlensing
-descriptors, and SN parameters — each with a calibrated uncertainty — from raw
-photometry plus Stage-1 hints. Trained supervised on Stage-0 labels.
-
-### 3.2 Input treatment — tokenization (`roman_td/tokenize.py` [TO BUILD])
-
-One token per photometric measurement:
+### 3.1 Tokenization (one token per photometric point)
 
 ```
-token = [ phase_norm, flux_norm, fluxerr_norm, band_onehot(6), image_onehot(4), is_real ]
+token = [ phase, flux_norm, fluxerr_norm, band_onehot(6), image_onehot(4), is_real ]
 ```
 
-Exact treatment, in order:
+- **Phase zero-point — one per SYSTEM:** `phase = (mjd − t_peak,ref)/(1 + z_source)`,
+  `t_peak,ref` = GP peak of the reference image only.
+  > **WARNING (delay-destroying if done wrong):** never phase each image to
+  > its own peak — that subtracts the delay out of the input. All images
+  > share the reference zero-point; the inter-image token offset IS the
+  > delay signal.
+- **Flux:** normalized by the system's brightest point (preserves
+  magnification ratios; never normalize by distance modulus).
+- Padding to `l_max = 512` with attention mask; non-detections are real
+  tokens (an early non-detection of image B pins the delay lower bound).
 
-1. **Phase zero-point — one common reference per SYSTEM.**
-   `phase = (mjd − t_peak,ref) / (1 + z_source)` where `t_peak,ref` is the GP
-   peak of the *reference image only*.
+### 3.2 Scalar features (17, fused after pooling)
 
-   > **WARNING (delay-destroying bug if done wrong):** do NOT phase each
-   > image relative to its own peak. That subtracts the delay out of the
-   > input; the network would have nothing left to learn the delay from and
-   > would parrot the GP hint. All images share the reference image's
-   > zero-point, so a non-reference image's tokens sit ≈ Δt/(1+z) away from
-   > the reference's — that offset IS the signal.
+`[z_source, z_lens, n_images, dt_gp×3, dt_gp_err×3, flux_ratio×3,
+gp_band_scatter, quality_onehot(4)]`. Delay-valued entries are stored as
+**days / `DT_SCALE` (= 100)** — the same unit the delay head predicts in.
+Raw-day targets stalled the v1 runs (heteroscedastic-NLL σ-inflation; see
+fixes.md 07-09). Known wart: hint slots are currently misaligned one slot vs
+targets — pending fix (b).
 
-2. **Flux normalization — per system, internal reference.**
-   `flux_norm = flux / max(flux over all images, bands, epochs of this system)`;
-   `fluxerr_norm = fluxerr / (same denominator)`. Never normalize via a
-   cosmological distance modulus — that divides out the magnification you are
-   trying to measure. Absolute scale information re-enters only through
-   `z_source` as a scalar feature.
-3. **Band one-hot** over the 6 Roman filters (F062…F184), fixed ordering,
-   zeros for bands absent from a survey tier.
-4. **Image one-hot** over slots 1–4, assigned in the order of the truth
-   record's `images` list (reference image always slot 1).
-5. **Padding/masking:** pad every system to `L_max` tokens (choose the 99th
-   percentile of token counts over the training set, ≈ 400–600 for 5-day
-   cadence); `is_real = 0` on padding; attention-mask padding out.
-6. **Non-detections are data:** epochs where the survey observed but flux/err
-   < 1σ still become tokens (flux_norm near 0 with its real error). An early
-   non-detection of image B pins the delay lower bound.
+### 3.3 Training-time augmentations (train split only)
 
-### 3.3 Per-system scalar features (fused after pooling)
+- **Noise realizations** (×3 per lens, same SN, different photometric noise) —
+  baked into the training set by the builder.
+- **GP-hint dropout** (p = 0.2): zero the GP features, quality → `fail`; the
+  hint must stay a refinement, not a crutch.
+- **Observer-window crop** (`--crop_prob`, off by default; 0.7 in crop runs):
+  clip each example to ONE shared random `--crop_window` (365 d) MJD window —
+  shared because Roman sees all images every visit, so trailing-image
+  truncation emerges from the delays automatically. Guards: ref image keeps
+  ≥ 5 pts, ≥ 2 images survive, else no crop; an image left < 3 pts gets its
+  dt/logmu loss masked; a crop removing > 20% of points also drops the GP
+  hint (full-curve GP would leak unseen data). Val/test always full curves.
 
-`[ z_source, z_lens, n_images, dt_gp (per image slot), dt_gp_err,
-flux_ratio, gp_band_scatter, gp_quality_onehot(4) ]`
+Both z's are guaranteed known for every system (survey design) — exact
+features, no missing-value handling.
 
-**GP-hint dropout:** during training, with probability 0.2 zero all GP-derived
-features (and set the quality one-hot to `fail`). This forces the network to
-solve the problem from tokens alone and treats the hint as refinement, so a
-wrong GP estimate at inference cannot fully steer the prediction.
+### 3.4 Architecture and loss (0.91 M parameters)
 
-**Window-crop augmentation (added 2026-07-07; off by default):** the stored
-curves cover each event completely, but real HLTDS curves are clipped by the
-survey campaign — a SN peaking near the survey start is caught post-peak
-only, and a trailing image (peak at +dt) may be caught pre-explosion or
-missed. With `--crop_prob p`, each train example is clipped (prob p, fresh
-every epoch) to ONE shared observer-time window of `--crop_window` days slid
-randomly over the event — shared because Roman sees all images at every
-visit, so per-image truncation falls out of the delays automatically.
-Guards: reference image must keep ≥5 points and ≥2 images must survive
-(else full curve); an image left with <3 points gets its dt/logmu loss
-masked (unmeasurable); a crop removing >20% of points also drops the GP
-hint (the full-curve GP answer would leak unseen data). Val/test always use
-full curves; truncation-stratified evaluation is a separate pass. Known
-approximation: `t_peak_ref` (phase zero-point) still comes from the
-full-curve GP — a global shift, harmless for delays, mildly informative for
-the SN-parameter heads.
+Linear embed (14 → 128) → learned CLS token → 4 pre-norm encoder blocks
+(8 heads, FF 512, dropout 0.1) → CLS ⊕ scalars → fusion MLP (145 → 256 → 256)
+→ four heads, each emitting (value, log σ): delays (3 non-ref slots),
+log μ-ratios (3), micro amp+slope (4 images), SN params (theta, host E(B−V)).
+Loss = masked Gaussian NLL summed over heads, equal weights; micro targets
+in tiers 0–1 are zeros and *not* masked — "no microlensing" must be reported.
+Do not scale the model up until this size and the GBT baseline are saturated.
 
-**Redshift assumption:** both `z_lens` and `z_source` are available for every
-system (survey design guarantees deflector and source redshifts), so they are
-fed as exact scalar features with no missing-value handling and no jitter
-augmentation. The rest-frame phase division by (1 + z_source) in tokenization
-(§3.2) can likewise treat z_source as exact.
+**Delay unit contract:** the network reads and writes delays in
+days/`DT_SCALE`; `train_transformer.py` (and any future inference driver)
+multiplies outputs and σ by `DT_SCALE` before reporting days.
 
-### 3.4 Architecture
+### 3.5 Training runs so far
 
-- Token embedding: linear → d_model = 128.
-- Encoder: 4–6 pre-norm transformer blocks, 8 heads, GELU, dropout 0.1.
-- Pooling: one learned `[CLS]` summary token.
-- Fusion: concat pooled vector with scalar features → 2-layer MLP → shared
-  representation `h` (256-d).
-- Size target ≈ 1–3 M parameters. Do not scale up until the gradient-boosted
-  baseline (§5.3) and this size are both saturated.
+| run | date | config | outcome |
+|---|---|---|---|
+| tier1_v1, smoke | 07-06 | 384-example set | invalid (t0 sim bug) |
+| deep_full_v1 / deep_crop_v1 | 07-08 | 60 ep, batch 64 / +crop 0.7 | delay head stalled: val P68 ≈ 40 d (raw-day targets; fixes.md 07-09) |
+| deep_full_v2 / deep_crop_v2 | 07-09 | same + DT_SCALE fix | in progress; delay NLL descending from epoch 0 |
 
-### 3.5 Output heads — fixed-size parameterization
+Remaining known fixes, applied ONE per retrain (v3 = +b, v4 = +c):
+(b) hint-slot alignment, (c) checkpoint on val_dt not val_total,
+(d) optional σ warmup — fixes.md "Pending".
 
-> Variable image count is handled by predicting **per-image quantities
-> relative to the reference image**, with a per-slot validity mask — never
-> "per pair" (variable-size output). This mirrors SNTD's series
-> parameterization (`dt_img`, `mu_img/mu_ref`), making the Stage-3 handoff a
-> direct substitution.
+### 3.6 Post-training (both UNBUILT, load-bearing)
 
-| Head | Output (per non-reference image slot i ∈ {2,3,4}) | Activation / range |
-|---|---|---|
-| Delay | `dt_i`, `log σ_dt,i` | linear; days, observer frame |
-| Magnification ratio | `log(μ_i/μ_ref)`, `log σ` | linear in log-ratio |
-| Microlensing (per image incl. ref) | amplitude `A_micro,i` (mag), chromatic slope `dA/dband_i`, `log σ` each | linear; 0 when absent |
-| SN parameters (per system) | `theta_hat`, `A_V_hat`, `log σ` each | linear |
+- **Calibration:** temperature-scale each head's σ on validation to hit 68%
+  coverage; upgrade the delay head to a small mixture density *only if* the
+  validation residuals show aliasing multimodality.
+- **Evaluation battery:** hints-off validation (is it more than a GP echo?),
+  truncation-stratified scoring (full / post-peak / trailing-clipped),
+  model-swap (train BayeSN-sim ↔ test SALT-sim).
 
-All heads read the shared `h` (joint prediction lets microlensing/color/dust
-constrain each other). Masked slots (absent images) contribute zero loss.
+### 3.7 Feeds Stage 3
 
-### 3.6 Training
-
-- **Loss:** sum over heads of Gaussian negative log-likelihood
-  `0.5·[(y−ŷ)²/σ² + log σ²]`, with per-target masks (absent image slots;
-  micro targets are 0 — not masked — in tiers 0–1, so the network learns to
-  *report* zero, and masked only where truly undefined).
-- **Curriculum:** epochs 1–N on tiers 0–1 only, then phase in tier 2, then 3.
-- **Split discipline:** train/val/test split **by lens system**, never by
-  noise realization — multiple realizations of one system must land in the
-  same split or the test set leaks.
-- **Calibration (load-bearing, not optional):** on the validation split,
-  compute the empirical coverage of the σ's (68%/95%); apply per-head
-  temperature scaling (or conformal offsets) as a fixed post-processing step.
-  If the delay residuals show multimodality (aliasing), upgrade the delay
-  head to a 3-component mixture density — decide from the validation
-  residuals, not in advance.
-- **Model-swap robustness test:** train on BayeSN-simulated systems, evaluate
-  on SALT-simulated systems (and vice versa). The degradation measures
-  sim-dependence directly — report it alongside every accuracy number.
-
-### 3.7 Outputs
-
-Per system (§6.4): per-image-slot `dt`, `dt_err`, `mu_ratio`, `mu_ratio_err`,
-micro amplitude/slope ± σ, SN params ± σ — all *post-calibration* — plus the
-model version hash and the tier (training bookkeeping only).
-
-### 3.8 How it feeds Stage 3
-
-Same mechanical handoff as the GP (§2.6) but tighter:
-`dt_i ± 4σ` → per-image t0 bounds; `theta_hat ± σ` → Gaussian prior on theta
-in `fit_system()` (replacing the N(0,1) default); `A_V_hat` → `hostebv`
-bound narrowing. Microlensing outputs do **not** feed Stage 3 (no microlensing
-term in the fit model yet) — they are flagging-grade side products validated
-against Stage-3 residuals.
-
-At inference on real data the chain is: Stage 1 → Stage 2 → Stage 3 for every
-system; Stage 2's numbers are the fast catalog, Stage 3's the publication
-numbers on the subset where it is run.
+Same handoff as the GP but tighter: `dt ± 4σ` → per-image t0 bounds;
+`theta ± σ` → Gaussian prior; E(B−V) → hostebv bound narrowing. Micro outputs
+do NOT feed Stage 3 (no micro term in the fit model) — they are
+flagging-grade side products validated against Stage-3 residuals.
 
 ---
 
 ## 4. Stage 3 — Physical fit (SNTD; the anchor)
 
-### 4.1 Purpose
+**Purpose:** simulation-independent, publication-grade delays via nested
+sampling of a physical SED model. Everything upstream exists to make this
+stage start in the right place and therefore run fast.
 
-Simulation-independent, publication-grade delays and magnification ratios via
-nested sampling of a physical SED model. Everything upstream exists to make
-this stage start in the right place and therefore run fast.
+### 4.1 Path A — SALT2-extended (BUILT: `sntd_wrapper.measure_one()`)
 
-### 4.2 Path A — SALT2-extended, `sntd_wrapper.measure_one()` (EXISTS)
+SNTD `parallel` method: each image fit independently; delay = difference of
+fitted t0. Modes: `robust` (wide bounds, uncapped; P68 1.14 d @ 55 min) and
+`fast` (windowed, capped; 1.88 d unprimed → **1.48 d GP-primed** @ ~4.5 min).
+Cuts: max true delay 150 d, min image SNR 10. [TO ADD, few lines]: extract
+per-image fitted `x0` → `mu_ratio_fit` benchmark column (currently computed
+by the sampler and discarded).
 
-**Inputs:** lens object, bands, z_source, cadence, depths, RNG, plus the fit
-knobs (`t0_window`, `t0_pad_days`, `npoints`, `maxcall`) bundled as
-`FIT_PRESETS["fast"]` = (30 d, 100, 8000) or `["robust"]` = (None, None, None).
+### 4.2 Path B — BayeSN two-stage (BUILT, verdict: **INFEASIBLE** 2026-07-06)
 
-**Treatment:**
-1. Simulate photometry internally via `extract_light_curves()` (Stage-0 Path A).
-2. Cuts: skip if max true delay > `max_delay_days` (150) or any image peak
-   SNR < `min_image_snr` (10).
-3. SNTD `parallel` method: fit SALT2-extended to each image independently
-   with nested sampling; delay = difference of per-image fitted t0.
-   - *robust*: t0 bounds span each image's significant-SNR detection window
-     ± `t0_pad_days`; uncapped sampling.
-   - *fast*: `sncosmo.fit_lc` pre-fit re-centers a `t0_window`-wide window
-     per image; `npoints`/`maxcall` capped. **With Stage 1 built, the pre-fit
-     re-centering is replaced by the GP window (§2.6) — this is the single
-     highest-value integration in the whole architecture.**
+`bayesn_wrapper.fit_system()`: joint series fit (delays as sampled
+parameters) → prior tightening → color fit. With every mitigation (GP-primed
+windows, log-uniform amplitude, 200k-call cap): 5.4 h/system, caps hit,
+bound-pinned delays with zero-width errors. Root cause: SNTD's 0.1-d phase
+rounding creates likelihood plateaus that kill joint nested sampling at these
+SNRs (fixes.md). Code kept as record. **Forward path (UNBUILT):** BayeSN SED
+through SNTD's *parallel* method — per-image fits sidestep the joint
+degeneracy.
 
-**Outputs:** result dict → benchmark rows in `delay_benchmark_{mode}.ecsv`
-(§6.5). **[TO BUILD, few lines]:** also extract the per-image fitted `x0` and
-write `mu_ratio_fit = x0_i / x0_ref` — the magnification ratio is currently
-computed by the sampler and thrown away (design doc §7).
-
-### 4.3 Path B — BayeSN two-stage, `bayesn_wrapper.fit_system()` (EXISTS — measured INFEASIBLE 2026-07-06)
-
-**Inputs:** MISN object + combined table (Stage-0 Path B), z, images,
-`npoints_series`, `npoints_color` (500 default; 100–200 acceptable),
-`delay_window` (40 d), `ncpu_fit`.
-
-**Treatment:**
-1. Reference image = brightest. `dt_img` bounds = peak-flux offset ± 40 d
-   (→ replaced by GP/transformer windows when available).
-2. **Series fit** (`nest_series_lc`): joint sampling of
-   `t0, theta, hostebv, amplitude, dt_*` with `theta ~ N(0,1)` prior. Delays
-   are *sampled parameters*, not derived.
-3. **Prior tightening:** series posterior → Gaussian theta prior
-   (med ± 5σ bounds) and 2σ-quantile t0 bounds for stage two — the in-repo
-   template for how *all* stage-to-stage handoffs in this architecture work.
-4. **Color fit** (`nest_color_lc`): adjacent-band color curves; `hostr_v`
-   freed (color constrains it independently of amplitude); delays re-sampled.
-   Falls back to series results if < 2 bands.
-
-**Outputs:** per-image delay posteriors (median, ±1σ from quantiles), timing
-per stage, ref label → `delay_benchmark_bayesn.ecsv` + optional per-lens JSON
-payloads.
-
-**Verdict (2026-07-06, feasibility test — details in fixes.md):** INFEASIBLE
-as built. With every mitigation applied (GP-primed windows, log-uniform
-amplitude, 200k-call cap per stage), one system cost 5.4 h, both stages hit
-the cap, and the delay returned bound-pinned with zero-width errors. Root
-cause: SNTD's 0.1-day phase-rounding likelihood plateau, unfixable repo-side
-for joint series/color sampling at these SNRs. **Forward path (unbuilt):**
-keep the BayeSN SED but fit through SNTD's *parallel* method (per-image fits,
-as in Path A), which avoids the joint-sampling degeneracy.
-
-### 4.4 Routing policy (which path, which mode)
+### 4.3 Routing policy (UNBUILT as code; the rule)
 
 ```
-GP quality == good      → SALT fast (GP-primed)          ~seconds–minute
-GP quality == broad     → SALT robust                     ~minutes
-GP quality == multipeak → SALT robust; flag for BayeSN
-high-value systems      → BayeSN-parallel (GP-primed)     [unbuilt — see §4.3
-(e.g. best H0 leverage, microlensing candidates)           verdict: two-stage
-                                                           route closed]
+GP/transformer quality good       → SALT fast, primed windows    (~minutes)
+quality broad or multipeak        → SALT robust                  (~1 h, flagged "hard")
+high-value systems (H0 leverage,  → BayeSN-parallel, primed      [UNBUILT]
+  microlensing candidates)
 ```
 
-The residual distribution *between* fast and robust on the same systems is
-itself a deliverable (accuracy cost of speed), via
-`scripts/compare_fit_modes.py` (EXISTS).
+The fast-vs-robust residual distribution on shared systems is itself a
+deliverable (accuracy cost of speed): `compare_fit_modes.py`.
 
 ---
 
 ## 5. Validation & benchmarking (cross-cutting)
 
-### 5.1 Metrics — computed identically for Stages 1, 2, 3
+### 5.1 Metrics — identical for Stages 1, 2, 3
 
-Per delay measurement, against the truth record:
-
-- `residual = dt_fit − dt_true` (days) — already in the benchmark tables.
-- **`frac_residual = residual / dt_true`** [TO ADD] — the H0-relevant number
-  (target ~1–2%); a 1-day error means opposite things at Δt = 5 d vs 60 d.
-- Coverage: fraction of systems with |residual| < 1σ_reported (target 0.68).
-- Binned by: `dt_true / cadence` (delays < 2 cadence steps are the failure
-  regime), z_source, n_images, tier, GP quality flag.
-- Wall time per system (already recorded by both drivers).
+`residual = dt_fit − dt_true` (d); P68 of |residual|; % < 2 d; coverage
+(|res| < 1σ, target 68%); wall time. [TO ADD]: `frac_residual = residual /
+dt_true` — the H0-relevant number (target 1–2%); binning by dt_true/cadence,
+z_source, n_images, tier, GP quality.
 
 ### 5.2 The three load-bearing tests
 
-1. **Calibration** (per stage that reports σ): coverage plots before/after
-   temperature scaling. An overconfident σ is worse than none.
-2. **Model-swap:** BayeSN-sim ↔ SALT-sim train/test cross (§3.6).
-3. **Matched-pair ablation:** tier-2 vs tier-1 twins (same lens, same SN,
-   same noise seed, microlensing on/off) → how much microlensing degrades Δt
-   and whether the micro head recovers the injected amplitude. This is the
-   referee-facing controlled experiment; the physical fits cannot produce it.
+1. **Calibration** before/after temperature scaling — an overconfident σ is
+   worse than none.
+2. **Model-swap** BayeSN-sim ↔ SALT-sim — measures sim-dependence; report
+   next to every accuracy number.
+3. **Matched-pair ablation** (tier-2 vs tier-1 twins: same lens, SN, noise
+   seed; micro on/off) — how much microlensing degrades Δt and whether the
+   micro head recovers the injected amplitude. The referee-facing controlled
+   experiment; physical fits cannot produce it.
 
-### 5.3 The boring baseline (build before the transformer)
+### 5.3 The boring baseline (BUILT: `scripts/gbt_baseline.py`)
 
-Gradient-boosted trees on Stage-1 summary features (dt_gp, err, per-band
-scatter, flux ratios, n_obs, peak SNRs, z's, quality flag) predicting the same
-targets. If it meets the Δt accuracy bar, the transformer is optional for
-delays; either way it sets the number the transformer must beat.
-
-**Status: BUILT** — `scripts/gbt_baseline.py`; method and results in
-`documents/gbt_baseline_explained.md`.
+Gradient-boosted trees on Stage-1 summary features predicting the *residual*
+(true − dt_gp; predicting the absolute delay wastes capacity re-learning the
+identity — fixes.md 07-06). Sets the number the transformer must beat;
+method and results in `gbt_baseline_explained.md`.
 
 ---
 
@@ -569,91 +371,78 @@ delays; either way it sets the number the transformer must beat.
 
 ### 6.1 Canonical photometry table (Stage 0 → 1, 2, 3)
 
-Astropy Table (ECSV on disk), one row per (image, epoch, band):
+ECSV, one row per (image, epoch, band): `mjd` (f8, observer frame), `filter`
+(sncosmo name, e.g. `f129`), `flux`/`fluxerr` (ZP 25 AB; σ = depth_5σ flux/5),
+`zp` (25.0), `zpsys` ("ab"), `image` (`image_1`…`image_4`, ordering = truth
+record's `images`). This is Path B's native format; Path A emits per-image
+tables (`time`/`band`) — adapt, don't modify.
 
-| column | dtype | definition |
-|---|---|---|
-| `mjd` | f8 | observer-frame time |
-| `filter` | str | sncosmo band name (e.g. `f129`) |
-| `flux` | f8 | at `zp` = 25.0, AB |
-| `fluxerr` | f8 | 1σ, from 5σ depth / 5 |
-| `zp` | f8 | 25.0 always |
-| `zpsys` | str | `"ab"` |
-| `image` | str | `image_1` … `image_4`; ordering = truth record `images` list |
-
-This is Path B's existing format. Path A emits per-image tables with columns
-`time`/`band`; **[TO BUILD]** a ~10-line adapter `to_canonical(image_tables)`
-in `roman_td/simulate.py` rather than touching `extract_light_curves`.
-
-### 6.2 Truth record (Stage 0 → training + all benchmarks)
-
-JSON per system, `lens_{i:05d}__truth.json`:
+### 6.2 Truth record (Stage 0 → training + benchmarks), one JSON per example
 
 ```json
-{
-  "lens_index": 42, "tier": 2,
-  "z_lens": 0.41, "z_source": 1.12,
-  "images": ["image_1", "image_2"],
-  "delays": [0.0, 23.7],
-  "mu_macro": [4.1, 2.3],
-  "micro": {"image_1": {"mjd": [...], "F129": [...], ...}, ...},
+{ "lens_index": 42, "tier": 1, "z_lens": 0.41, "z_source": 1.12,
+  "images": ["image_1","image_2"], "delays": [0.0, 23.7], "mu_macro": [4.1, 2.3],
+  "micro_amp": {"image_1": 0.0, "image_2": 0.0},
   "sn_params": {"theta": 0.31, "hostebv": 0.05, "hostr_v": 3.1, "amplitude": 1.2e-4},
-  "sim_config": {"survey": "time_domain_deep", "cadence": 5.0,
-                  "depths": {...}, "seed": 42, "sim_model": "bayesn"}
-}
+  "sim_config": {"survey": "time_domain_deep", "cadence": {"F087": 5.0, "...": 10.0},
+                 "depths": {"F087": 26.04, "...": 0}, "seed": 42},
+  "gp": { ...Stage-1 result, §6.3... } }
 ```
 
-Delays and μ are **post-detection-cut, re-referenced** values (§1.3 Path B
-step 5). `micro` curves sampled on the observation grid; all-zeros for
-tiers 0–1.
+Delays/μ are **post-detection-cut, re-referenced** values. The builder embeds
+the Stage-1 GP result under `"gp"` so training needs no second pass.
 
 ### 6.3 Stage 1 output (GP → 2, 3)
 
-JSON/dict per system:
-
-```json
-{
-  "lens_index": 42, "ref_image": "image_1", "t_peak_ref": 60012.3,
-  "per_image": {
-    "image_2": {"dt_gp": 22.1, "dt_gp_err": 3.4,
-                 "dt_per_band": {"f106": 21.0, "f129": 23.5},
-                 "flux_ratio": 0.55, "flux_ratio_err": 0.06,
-                 "quality": "good"}
-  },
-  "wall_time_s": 4.2
-}
-```
+Per system: `ref_image`, `t_peak_ref`, `wall_time_s`, and per non-reference
+image `{dt_gp, dt_gp_err, dt_per_band, flux_ratio, flux_ratio_err, quality}`.
+Stored in physical days here; conversion to days/`DT_SCALE` happens only
+inside `scalar_features()`.
 
 ### 6.4 Stage 2 output (transformer → 3 + catalog)
 
-Per system, per image slot: `dt`, `dt_err`, `log_mu_ratio`, `log_mu_ratio_err`,
-`micro_amp`, `micro_slope` (+ errs), `theta_hat`, `av_hat` (+ errs),
-`model_version`, `calibration_version`. All σ post-calibration.
+Per system, per image slot: `dt`, `dt_err`, `log_mu_ratio` (+err),
+`micro_amp`, `micro_slope` (+errs), `theta_hat`, `av_hat` (+errs), model +
+calibration version. Reported in **days** (heads × `DT_SCALE`), σ
+post-calibration.
 
-### 6.5 Stage 3 output (benchmark tables — EXIST)
+### 6.5 Stage 3 / benchmark tables (`outputs/benchmarks/*.ecsv`)
 
-`delay_benchmark_{fast,robust}.ecsv` / `delay_benchmark.ecsv`, one row per
-non-reference image: `lens_index, image, z_lens, z_source, n_images,
-true_delay, fit_delay, fit_err_lo, fit_err_hi, residual, fit_mode,
-fit_time_s`. **[TO ADD]:** `true_mu_ratio, fit_mu_ratio, frac_residual,
-gp_quality` columns as the upstream stages land.
+One row per non-reference image: `lens_index, image, z_lens, z_source,
+n_images, true_delay, fit_delay, fit_err_lo, fit_err_hi, residual, fit_mode,
+fit_time_s` (+ `gp_time_s`, quality in the GP tables). [TO ADD]:
+`true_mu_ratio, fit_mu_ratio, frac_residual` as §4.1/§5.1 land.
 
 ---
 
-## 7. Build order with dependencies
+## 7. Status ledger
 
-| # | Task | Depends on | Est. size | Payoff |
-|---|---|---|---|---|
-| 1 | `x0`-ratio extraction in `measure_one` + `mu_ratio` benchmark columns | — | few lines | magnification benchmark unblocked |
-| 2 | `frac_residual` + binned metrics in benchmark analysis | — | small | H0-relevant accuracy visible |
-| 3 | Canonical-table adapter (§6.1) | — | ~10 lines | one schema everywhere |
-| 4 | **Stage 1 GP** (`crosscorr.py`) + `run_gp_population.py` | 3 | days | model-free Δt in seconds |
-| 5 | GP-primed fast mode in `measure_one` + routing rule | 4 | small | fast mode trustworthy; big wall-time win |
-| 6 | Truth records + tier-0/1 training set builder | 3 | days | training data flows |
-| 7 | Microlensing injection (tier 2) | 6 | the hard one | the novel labels |
-| 8 | GBT baseline on GP features | 4, 6 | days | the number to beat |
-| 9 | Tokenizer + transformer + calibration | 6, 7, 8 | weeks | amortized inference |
-| 10 | Model-swap + matched-pair validation | 9 | days | the referee-facing evidence |
+**Done** (dates = when verified working):
 
-Items 1–5 involve no ML and already improve the current pipelines; items 6–10
-are the ML track and can proceed in parallel once 3 lands.
+| piece | date |
+|---|---|
+| Stage 3 SALT fast/robust + benchmarks | pre-07 |
+| Stage 1 GP + driver + benchmark | 07-05 |
+| GP-primed fast mode (the 1.88 → 1.48 d win) | 07-06 |
+| GBT baseline (residual form) | 07-06 |
+| BayeSN two-stage feasibility → INFEASIBLE verdict | 07-06 |
+| HLTDS spec cadences/depths in sim + builder | 07-07 |
+| t0 double-count sim bug found + fixed | 07-07 |
+| Training-set builder; tier1_deep + tier1_wide built | 07-07/08 |
+| Tokenizer, Dataset (+crop aug), transformer, training driver | 07-07/08 |
+| v1 stall diagnosed → DT_SCALE fix (a); v2 runs launched | 07-09 |
+
+**Remaining, in priority order:**
+
+| # | task | blocked by |
+|---|---|---|
+| 1 | v2 verdict vs GP bar; fixes (b) hint alignment, (c) val_dt checkpointing, (d) σ warmup — one per retrain | v2 runs finishing |
+| 2 | Evaluation battery: hints-off val, truncation-stratified, GP-bar re-measure on full spec build | 1 |
+| 3 | Calibration pass (temperature scaling; mixture head only if aliasing seen) | 1 |
+| 4 | Deep+wide mixed training (~60/40 realistic ratio) + per-tier metrics | 1 |
+| 5 | Dynamic batch padding (2–4× training speedup) | — |
+| 6 | Microlensing injection → tier-2 set; matched-pair ablation | — (the hard one) |
+| 7 | BayeSN-parallel fitting path (GP/transformer-primed) | — |
+| 8 | Inference driver wiring Chain C + routing rule as code | 1–3 |
+| 9 | `mu_ratio` extraction + `frac_residual` benchmark columns | — (few lines) |
+| 10 | Model-swap robustness test | 6 |
