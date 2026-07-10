@@ -30,6 +30,11 @@ BAND_ORDER = ["f062", "f087", "f106", "f129", "f158", "f184"]
 N_IMAGE_SLOTS = 4
 TOKEN_DIM = 3 + len(BAND_ORDER) + N_IMAGE_SLOTS + 1   # 3+6+4+1 = 14
 GP_QUALITIES = ["good", "broad", "multipeak", "fail"]
+# delay-scale constant: dt targets and dt_gp(_err) hint features are stored
+# as days / DT_SCALE so the network works in O(1) units (raw days span
+# hundreds; unscaled they stall the heteroscedastic NLL). Multiply model
+# delay outputs and sigmas by DT_SCALE to get days back.
+DT_SCALE = 100.0
 
 
 def _colnames(tab):
@@ -116,7 +121,8 @@ def scalar_features(
 
     Layout (fixed):
       [ z_source, z_lens, n_images,
-        dt_gp slot2..4, dt_gp_err slot2..4, flux_ratio slot2..4,
+        dt_gp slot2..4, dt_gp_err slot2..4 (both days/DT_SCALE),
+        flux_ratio slot2..4,
         gp_band_scatter, quality_onehot(4) ]                    -> 16 floats
 
     gp : the §6.3 GP result dict for this system (per_image keyed by image
@@ -139,9 +145,9 @@ def scalar_features(
             if slot >= N_IMAGE_SLOTS - 1:
                 break
             if np.isfinite(e.get("dt_gp", np.nan)):
-                out[3 + slot] = e["dt_gp"]
+                out[3 + slot] = e["dt_gp"] / DT_SCALE
             if np.isfinite(e.get("dt_gp_err", np.nan)):
-                out[3 + (N_IMAGE_SLOTS - 1) + slot] = e["dt_gp_err"]
+                out[3 + (N_IMAGE_SLOTS - 1) + slot] = e["dt_gp_err"] / DT_SCALE
             if np.isfinite(e.get("flux_ratio", np.nan)):
                 out[3 + 2 * (N_IMAGE_SLOTS - 1) + slot] = e["flux_ratio"]
             dpb = list(e.get("dt_per_band", {}).values())

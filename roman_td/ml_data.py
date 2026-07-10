@@ -10,7 +10,7 @@ Runs in the `roman_ml` env (torch + numpy + astropy only — no fitting stack).
 
 Targets, all in the tokenizer's slot order (REFERENCE IMAGE = slot 0; the
 "non-reference slots" below are slots 1..3):
-    dt      (3,)  observer-frame delay vs reference, days   + dt_mask
+    dt      (3,)  observer-frame delay vs reference, days/DT_SCALE + dt_mask
     logmu   (3,)  log(mu_i / mu_ref)                        + same mask
     micro_amp / micro_slope (4,) per image incl. reference  + micro_mask
     theta, dust (scalars; dust = host E(B-V))
@@ -28,7 +28,7 @@ from torch.utils.data import Dataset
 from astropy.table import Table
 
 from roman_td.tokenize import (tokenize_system, scalar_features,
-                               N_IMAGE_SLOTS, TOKEN_DIM)
+                               N_IMAGE_SLOTS, TOKEN_DIM, DT_SCALE)
 
 N_OTHER = N_IMAGE_SLOTS - 1   # non-reference slots
 
@@ -138,7 +138,7 @@ class LensedSNDataset(Dataset):
         for s, img in enumerate(images[1:][:N_OTHER]):
             if n_pts.get(img, 0) < MIN_PTS_TARGET:
                 continue
-            dt[s] = delays[img] - delays[ref]
+            dt[s] = (delays[img] - delays[ref]) / DT_SCALE
             logmu[s] = np.log(max(mus[img], 1e-12) / max(mus[ref], 1e-12))
             dt_mask[s] = 1.0
 

@@ -30,6 +30,7 @@ from torch.utils.data import DataLoader
 
 from roman_td.paths import TRAINING_DIR, REPO_ROOT
 from roman_td.ml_data import LensedSNDataset
+from roman_td.tokenize import DT_SCALE
 from roman_td.transformer import LensedSNTransformer, loss_fn
 
 
@@ -61,8 +62,9 @@ def delay_metrics(model, loader):
         for batch in loader:
             out = model(batch["tokens"], batch["mask"], batch["scalars"])
             m = batch["dt_mask"].bool()
-            res.append((out["dt"] - batch["dt"])[m].numpy())
-            sig.append(out["dt_logsig"][m].exp().numpy())
+            # model works in days/DT_SCALE; report metrics in days
+            res.append((out["dt"] - batch["dt"])[m].numpy() * DT_SCALE)
+            sig.append(out["dt_logsig"][m].exp().numpy() * DT_SCALE)
     res = np.concatenate(res) if res else np.array([])
     sig = np.concatenate(sig) if sig else np.array([])
     if not len(res):
