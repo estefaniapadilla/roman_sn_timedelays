@@ -102,10 +102,11 @@ data/roman_deep*.pkl ─▶ build_training_set.py          (env: sntd_bayesn)
 Data on disk: `tier1_deep` = 8,286 examples / 2,762 systems (3 noise
 realizations each; splits by lens system 6657/879/750), `tier1_wide` =
 5,055 / 1,685. (`outputs/training/tier1` is the pre-fix set — invalid, see
-fixes.md t0 bug.) Runs so far: `deep_full_v1`/`deep_crop_v1` (07-08, delay
-head stalled — units bug, fixed by `DT_SCALE`), `deep_full_v2`/`deep_crop_v2`
-(07-09, in progress, stall resolved). Pending one-at-a-time fixes (b)(c)(d):
-see fixes.md "Pending".
+fixes.md t0 bug.) Runs so far: v1 pair (07-08, delay head stalled — units
+bug), v2 pair (07-09, +`DT_SCALE` fix: deep_full_v2 val P68 **2.81 d**,
+hints-off 2.93 d — vs GP hint 1.91 d), v3 pair (07-10, +residual delay head
+anchored on the GP hint, zero-init: untrained floor = GP accuracy; target
+< 1.91 d). Checkpoint selection keys on val_dt since 07-10 (fixes.md).
 
 ### Chain C — inference chain (the product; wiring UNBUILT)
 
@@ -121,6 +122,26 @@ Every stage exists; what's missing is the driver that chains them and the
 post-training calibration pass (§5.2). Stage 2's output is the catalog for
 *all* systems; Stage 3 runs on the subset worth CPU-hours, started inside
 Stage 2's tight windows.
+
+### What is NOT in the pipeline (benchmarks and closed routes)
+
+Two components appear throughout this repo and the logs but are **not** part
+of any chain above — listing them here because both are easy to mistake for
+pipeline stages:
+
+| component | what it actually is | status |
+|---|---|---|
+| **GBT baseline** (`gbt_baseline.py`) | A deliberately simple ML benchmark (trees on GP features). Exists only to set the accuracy bar the transformer must beat. Feeds nothing, receives nothing from downstream. Its one lasting contribution: the residual-target lesson (predict the *correction* to dt_gp, not the delay), reused in the transformer's v3 delay head. | benchmark only, retired to the bench |
+| **BayeSN as a FITTER** (`bayesn_wrapper.py`, two-stage) | The abandoned attempt to *fit* delays by jointly sampling BayeSN parameters through SNTD. Measured INFEASIBLE (§4.2). | closed route, code kept as record |
+
+**Do not confuse BayeSN-the-fitter with BayeSN-the-simulator.** BayeSN is an
+SED model with two distinct uses here: *generating* light curves from known
+parameters (pure arithmetic, cannot fail — this is Stage 0 Path B, the
+backbone of every training example) and *searching* for parameters given
+noisy data (the sampling problem that proved infeasible). Only the search
+was abandoned. The GP is likewise dual-role but fully alive: pipeline Stage
+1 (hints + phase zero-point) *and* the standing accuracy bar (1.91 d P68 on
+the val slots).
 
 ---
 
@@ -313,7 +334,7 @@ Cuts: max true delay 150 d, min image SNR 10. [TO ADD, few lines]: extract
 per-image fitted `x0` → `mu_ratio_fit` benchmark column (currently computed
 by the sampler and discarded).
 
-### 4.2 Path B — BayeSN two-stage (BUILT, verdict: **INFEASIBLE** 2026-07-06)
+### 4.2 Path B — BayeSN two-stage (BUILT, verdict: **INFEASIBLE** 2026-07-06 — closed route; the fitter only, the simulator lives on in Stage 0; see §0)
 
 `bayesn_wrapper.fit_system()`: joint series fit (delays as sampled
 parameters) → prior tightening → color fit. With every mitigation (GP-primed
@@ -358,12 +379,55 @@ z_source, n_images, tier, GP quality.
    micro head recovers the injected amplitude. The referee-facing controlled
    experiment; physical fits cannot produce it.
 
-### 5.3 The boring baseline (BUILT: `scripts/gbt_baseline.py`)
+### 5.3 The boring baseline (BUILT: `scripts/gbt_baseline.py` — benchmark only, NOT a pipeline stage; see §0)
 
 Gradient-boosted trees on Stage-1 summary features predicting the *residual*
 (true − dt_gp; predicting the absolute delay wastes capacity re-learning the
 identity — fixes.md 07-06). Sets the number the transformer must beat;
 method and results in `gbt_baseline_explained.md`.
+
+### 5.4 Literature benchmarks (added 07-12; update when v4 finishes)
+
+Published delay-measurement accuracy, with conditions — the rows to beat:
+
+| method | precision | conditions |
+|---|---|---|
+| HOLISMOKES XII LSTM-FCNN (2024, arXiv:2403.08029) | 0.7 d bias-free | LSST SNe Ia + DEDICATED follow-up: i-band every 1–3 d, 24.5 mag (1 mag deeper than survey) — NOT survey cadence |
+| HOLISMOKES VII Random Forest (2022) | 1.4 d | same follow-up conditions |
+| Pierel+ 2021 Roman forecast (ApJ 908, 190) | ~2 d (SN Ia) | Roman HLTDS survey cadence; template fitting (= our Stage 3 analogue) |
+| GausSN Bayesian GP (2024, arXiv:2311.17997) | 43.6% of delays < 5% frac err | Roman survey cadence, no follow-up (their own mocks) |
+| SN Refsdal measured (Kelly+ 2023) | ±5.6 d on 376 d = 1.5% | real; 5 images, years baseline, cluster lens |
+| SN H0pe measured (Pierel+ 2024) | ±4–10 d on 49/117 d ≈ 8% | real; JWST photometry, 3 images |
+
+Our standing on spec-consistent HLTDS sims (val split, deep31k build):
+
+| ours | P68 | <5% frac err (all / Δt>20 d) | notes |
+|---|---|---|---|
+| GP cross-correlation (Stage 1) | 1.91 d | 51.6% / 69.9% | 4 s/system |
+| transformer deep31k_full_v4 FINAL (best ep 21, early stop 41/90) | 2.07 d (hinted **1.91 d** = GP tie, unbiased) | 50.7% / — | ~1 ms/system; no-hint slots 200 d; next: v5 = 30-epoch schedule (peak was at ~7k steps with lr still high) |
+| GP-primed SNTD fast (Stage 3) | 1.48 d | (pre-spec sims) | ~4.5 min/system |
+| SNTD robust (Stage 3) | 1.14 d | (pre-spec sims) | ~55 min/system |
+
+Read of the field: three independent method families (template fits, GPs,
+neural nets) all land at ~1–2 d on survey-cadence data — that is likely the
+information floor at a 5-day anchor cadence. Sub-day published numbers
+(HOLISMOKES 0.7 d) buy it with dense follow-up, not method. Cross-sim
+caveat: fractional metrics depend strongly on each suite's delay
+distribution and selection; the rigorous comparison would run GausSN's
+public code on OUR validation set (expected to land near our GP row).
+
+Path to beating each row:
+1. Pierel+ ~2 d forecast — Chain C already under it (primed fast 1.48 d,
+   robust 1.14 d); amortized-only beat needs v4 to finish < 1.9 d.
+2. GausSN 43.6% — measured above it (~50%) already; make rigorous by
+   running GausSN on our sims.
+3. HOLISMOKES 0.7 d — different regime; to compete, add a FOLLOW-UP
+   SIMULATION MODE (dense-cadence window appended post-discovery — small
+   builder extension, mirrors the crop machinery) and quote both regimes.
+4. Real-measurement rows (Refsdal/H0pe) — not comparable populations;
+   they benchmark end-to-end H0 practice, not method precision.
+5. The differentiator no row attempts: joint delay + microlensing
+   estimation (tier 2) — published methods marginalize micro as noise.
 
 ---
 

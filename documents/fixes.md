@@ -3,16 +3,23 @@
 Major bugs and their fixes, newest first. One line each — details live in
 git history. Add a row when a bug costs > 1 hour or changes results.
 
-## Pending (known, NOT yet applied — one per retrain, compare runs: v3 = a+b, v4 = a+b+c)
+## Pending (known, NOT yet applied)
 
-| # | Problem | Planned fix | Files |
-|---|---|---|---|
-| (b) | GP hint slots misaligned: `scalar_features` iterates `per_image` incl. the reference at slot 0 → hints shifted one slot vs dt targets (= images[1:]); quad's 4th-image hint silently dropped | Skip the ref entry so hint slot s = target slot s | `tokenize.py` |
-| (c) | `best.pt` + early stop keyed on val_total, dominated by trivial heads (micro zeros, theta, dust) — delay head barely moves it | Select/early-stop on val_dt (or weighted total) | `train_transformer.py` |
-| (d) | Heteroscedastic NLL can still stall via σ inflation (residual risk after DT_SCALE) | Optional: freeze log σ for first ~5 epochs, or β-NLL. Only if (b)+(c) plateau above GP level | `transformer.py`/`train_transformer.py` |
+(none)
+
+**(b) RETRACTED 07-10** — suspected GP-hint slot misalignment (ref image at
+slot 0 shifting hints vs targets) is **not a bug**: verified on all 8,286
+tier1_deep records that `per_image` never contains the ref and its key order
+matches the target slots exactly. Root of the false alarm: a wrong code
+comment in `tokenize.py` ("slot 1 is the reference"), trusted over the data.
+Comment corrected + defensive ref skip added (bit-identical on 500 systems —
+no retrain). Lesson: same as the t0 bug — check the data, not the comment.
 
 | Date | Problem | Root cause | Fix | Files |
 |---|---|---|---|---|
+| 07-12 | Crop augmentation crashed (`ValueError: high - low < 0` in `_crop_window`'s `uniform`) killing deep31k_crop_v4 at epoch 0 | Window-start range `[lo−0.3W, hi−0.7W]` is invalid when the curve spans < 0.4·W = 146 d; old 10k population had zero such systems (min z_source too high), 31k build sampled the rare low-z_source tail — latent since the feature was built | Short-span guard: skip the crop (return uncropped, kept_frac 1.0). Verified: all 21,531 train examples sweep clean; guard hits 15 (0.07%), span min 130 d. Lesson: sweep augmentations over the WHOLE dataset, tails emerge at scale | `ml_data.py` |
+| 07-10 | Residual delay head, two failed forms before the working one: (i) ONE output unit for both regimes → biased compromise (+25 d by epoch 1: "output 0" for 80% hinted vs "output full delay" for 20% dropped-hint conflict); (ii) values gated but ONE shared σ → stalemate (37 no-hint slots' huge misses hold σ at ~100 d for everyone; at σ=100 d the miss/σ² pull is too weak, correction head wanders, +3 d growing bias by epoch 4) | Heteroscedastic-NLL regime mixing — fix (d) scenario | Gate value AND σ by hint presence: hinted = (hint + corr, σ init 10 d), no-hint = (absolute, σ init 100 d), `torch.where` routes gradients per branch. Untrained floor = GP accuracy exactly; val_dt starts ≈ +1.25 (GP-error tail under tight σ — the training signal), goes negative as σ splits by quality flag | `transformer.py` |
+| 07-10 | `best.pt` + early stop keyed on val_total, dominated by the trivially-learnable heads (micro zeros, theta, dust) — could keep the wrong epoch's weights for delays and mis-time early stopping | Sum-of-heads selection metric | Select/early-stop on val_dt. No retrain: criterion doesn't affect gradients; in v2 it cost only 0.002 (ep 57 vs 56) — takes effect in the next run | `train_transformer.py` |
 | 07-09 | Transformer delay head useless (val P68 ≈ 40 d vs 1.9 d from just copying the GP hint; predict-zero = 51 d) in deep_full_v1/deep_crop_v1 | dt targets + dt_gp(_err) hints fed as raw days (pop std 129 d) → heteroscedastic NLL inflates σ (p90 = 234 d), mean-gradient ∝ 1/σ² stalls; predictions collapsed to std 12 d | `DT_SCALE = 100`: targets and hints stored as days/100, metrics ×100 back to days. Retrain = v2 runs | `tokenize.py`, `ml_data.py`, `train_transformer.py` |
 | 07-07 | **BayeSN sim (Path B) evaluated the SED ~60,000 d after peak** — every flux in the tier1 training set (384 examples) is wild model extrapolation, some bands 10³⁰× too bright; smoke + tier1_v1 transformer runs trained on garbage. Benchmarks unaffected (Path A/lenstronomy) | `span_lo = t0 + model.mintime()` double-counts t0 (sncosmo min/maxtime already include t0); the phase cut compared relative phase to absolute time, masking the crash | Span = model time range directly; phase cut on `mjd − dt` vs model range. Verified: peak mags 24–26, image peaks at t0+dt, GP recovers delays | `simulate.py` |
 | 07-07 | Sims too optimistic vs HLTDS spec: every filter at 5 d — HLTDS spec is one anchor filter at 5 d + rest at 10 d (per tier) → existing benchmarks/training set have ~2× too many points in the 10-day filters (optimistic) | Simulator had a single global cadence; per-filter CCS spec not yet encoded | `SURVEY_CADENCE` + `SURVEY_EXPTIME` + `SURVEY_DEPTH_5SIG` in `simulate.py` (depths from CCS exposure times × WFI 1-hr sensitivities, m5 − 1.25·log₁₀(3600/t)); `simulate_photometry` takes per-band cadences; builder uses per-tier spec by default | `simulate.py`, `build_training_set.py` |
