@@ -386,7 +386,7 @@ Gradient-boosted trees on Stage-1 summary features predicting the *residual*
 identity — fixes.md 07-06). Sets the number the transformer must beat;
 method and results in `gbt_baseline_explained.md`.
 
-### 5.4 Literature benchmarks (added 07-12; update when v4 finishes)
+### 5.4 Literature benchmarks (added 07-12; full cost-vs-accuracy ladders in `performance_comparisons.md`)
 
 Published delay-measurement accuracy, with conditions — the rows to beat:
 
@@ -501,7 +501,7 @@ fit_time_s` (+ `gp_time_s`, quality in the GP tables). [TO ADD]:
 | # | task | blocked by |
 |---|---|---|
 | 1 | v2 verdict vs GP bar; fixes (b) hint alignment, (c) val_dt checkpointing, (d) σ warmup — one per retrain | v2 runs finishing |
-| 2 | Evaluation battery: hints-off val, truncation-stratified, GP-bar re-measure on full spec build | 1 |
+| 2 | Evaluation battery: truncation DONE 07-13 (`eval_truncated.py`; verdict in performance_comparisons.md — info preserved: all ~2 d, transformer +7%; ref peak lost: all methods ~180 d); remaining: crop_v4-final rerun, hints-off v4, GP-bar re-measure | 1 |
 | 3 | Calibration pass (temperature scaling; mixture head only if aliasing seen) | 1 |
 | 4 | Deep+wide mixed training (~60/40 realistic ratio) + per-tier metrics | 1 |
 | 5 | Dynamic batch padding (2–4× training speedup) | — |
