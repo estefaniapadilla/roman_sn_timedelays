@@ -32,6 +32,22 @@ from roman_td.tokenize import (tokenize_system, scalar_features,
 
 N_OTHER = N_IMAGE_SLOTS - 1   # non-reference slots
 
+
+def collate_dynamic(batch):
+    """Default-style collate, then trim token padding to the batch max.
+
+    Real tokens are contiguous at the front (tokenize.py), so slicing off
+    the all-padding tail changes nothing the model computes — padding is
+    attention-masked and never enters the loss. Attention cost is O(L^2):
+    trimming 512 -> ~200-250 typical is a 2-4x epoch speedup.
+    """
+    out = {k: torch.stack([b[k] for b in batch]) for k in batch[0]}
+    l_real = int(out["mask"].sum(dim=1).max())
+    l_keep = max(l_real, 1)
+    out["tokens"] = out["tokens"][:, :l_keep]
+    out["mask"] = out["mask"][:, :l_keep]
+    return out
+
 # --- window-crop augmentation (off unless crop_prob > 0) -----------------
 MIN_PTS_IMAGE = 5    # an image "survives" a crop with at least this many pts
 MIN_PTS_TARGET = 3   # below this, an image's dt/logmu targets are masked
@@ -86,6 +102,11 @@ class LensedSNDataset(Dataset):
         img = np.asarray(tab["image"]).astype(str)
         lo, hi = float(mjd.min()), float(mjd.max())
         W = float(self.crop_window_days)
+        if hi - 0.7 * W <= lo - 0.3 * W:
+            # curve spans < 0.4 W: the uniform() below would be invalid
+            # (crashed on short-span systems in the 31k build) — and such
+            # a curve is already effectively truncated, so don't crop
+            return tab, 1.0
         for _ in range(5):
             # window slides from "tail clipped" to "rise clipped / trailing
             # image only" — mimics a SN exploding at a random time relative

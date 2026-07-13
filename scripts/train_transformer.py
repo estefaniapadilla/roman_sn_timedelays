@@ -29,7 +29,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from roman_td.paths import TRAINING_DIR, REPO_ROOT
-from roman_td.ml_data import LensedSNDataset
+from roman_td.ml_data import LensedSNDataset, collate_dynamic
 from roman_td.tokenize import DT_SCALE
 from roman_td.transformer import LensedSNTransformer, loss_fn
 
@@ -88,6 +88,13 @@ def main():
                          "0 = full curves (original behavior)")
     ap.add_argument("--crop_window", type=float, default=365.0,
                     help="observing-window length for crops (days)")
+    ap.add_argument("--residual_dt", type=int, default=1,
+                    help="1 = delay head predicts correction to the GP hint "
+                         "(residual form); 0 = absolute delay (v1/v2 runs)")
+    ap.add_argument("--dynamic_pad", type=int, default=1,
+                    help="1 = trim each batch's token padding to its longest "
+                         "real curve (identical results, 2-4x faster); "
+                         "0 = fixed l_max padding")
     ap.add_argument("--l_max", type=int, default=512)
     ap.add_argument("--patience", type=int, default=20,
                     help="early stop after this many epochs w/o val improvement")
@@ -110,11 +117,13 @@ def main():
     va = LensedSNDataset(args.data, "val", l_max=args.l_max,
                          gp_dropout=0.0, limit=args.limit)
     print(f"train {len(tr)}  val {len(va)}  (data: {args.data})")
+    collate = collate_dynamic if args.dynamic_pad else None
     tl = DataLoader(tr, batch_size=args.batch, shuffle=True,
-                    num_workers=args.workers)
-    vl = DataLoader(va, batch_size=args.batch, num_workers=args.workers)
+                    num_workers=args.workers, collate_fn=collate)
+    vl = DataLoader(va, batch_size=args.batch, num_workers=args.workers,
+                    collate_fn=collate)
 
-    model = LensedSNTransformer()
+    model = LensedSNTransformer(residual_dt=bool(args.residual_dt))
     n_par = sum(p.numel() for p in model.parameters())
     print(f"model: {n_par/1e6:.2f} M parameters")
 
@@ -140,8 +149,11 @@ def main():
             f.write(f"{epoch},{trm['total']:.4f},{vam['total']:.4f},"
                     f"{vam['dt']:.4f},{sched.get_last_lr()[0]:.2e}\n")
         marker = ""
-        if vam["total"] < best:
-            best, best_epoch = vam["total"], epoch
+        # select/early-stop on the DELAY head, not the total: the total is
+        # dominated by the trivially-learnable heads (micro zeros, theta,
+        # dust) — fixes.md fix (c)
+        if vam["dt"] < best:
+            best, best_epoch = vam["dt"], epoch
             torch.save({"model": model.state_dict(), "epoch": epoch,
                         "val": vam}, os.path.join(outdir, "best.pt"))
             marker = "  *best*"
@@ -155,7 +167,7 @@ def main():
     ckpt = torch.load(os.path.join(outdir, "best.pt"), weights_only=False)
     model.load_state_dict(ckpt["model"])
     dm = delay_metrics(model, vl)
-    print(f"\nbest epoch {ckpt['epoch']}  val NLL {best:.3f}")
+    print(f"\nbest epoch {ckpt['epoch']}  val dt NLL {best:.3f}")
     if dm:
         print(f"val delays: n={dm['n']}  median={dm['median']:+.2f}d  "
               f"P68={dm['p68']:.2f}d  <2d: {dm['lt2']:.0f}%  "

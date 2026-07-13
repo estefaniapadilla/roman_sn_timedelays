@@ -35,6 +35,9 @@ GP_QUALITIES = ["good", "broad", "multipeak", "fail"]
 # hundreds; unscaled they stall the heteroscedastic NLL). Multiply model
 # delay outputs and sigmas by DT_SCALE to get days back.
 DT_SCALE = 100.0
+# scalar-feature columns holding the dt_gp hints (see scalar_features
+# layout) — the residual delay head anchors its output on these
+HINT_DT_SLICE = slice(3, 3 + N_IMAGE_SLOTS - 1)
 
 
 def _colnames(tab):
@@ -139,9 +142,16 @@ def scalar_features(
     if gp is not None and not drop_gp:
         per = gp.get("per_image", {})
         scatters = []
-        # slot order: gp per_image entries follow the token image order
-        # (reference first, then others) — slot 1 is the reference (dt=0).
-        for slot, (name, e) in enumerate(per.items()):
+        # per_image holds ONLY non-reference images, in token image order —
+        # verified against all 8,286 tier1_deep records 2026-07-10 — so
+        # hint slot s aligns with dt/logmu target slot s. The ref skip is
+        # defensive (a future GP version including the ref would misalign
+        # every slot silently).
+        ref_name = gp.get("ref_image")
+        slot = 0
+        for name, e in per.items():
+            if name == ref_name:
+                continue
             if slot >= N_IMAGE_SLOTS - 1:
                 break
             if np.isfinite(e.get("dt_gp", np.nan)):
@@ -153,6 +163,7 @@ def scalar_features(
             dpb = list(e.get("dt_per_band", {}).values())
             if len(dpb) > 1:
                 scatters.append(np.std(dpb))
+            slot += 1
         if scatters:
             out[3 + 3 * (N_IMAGE_SLOTS - 1)] = float(np.mean(scatters))
         # worst per-image flag = the system's flag
