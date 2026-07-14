@@ -2,9 +2,8 @@
 
 Every method as a cost-vs-accuracy ladder, ours and the literature's, with
 conditions attached. Companion to `pipeline_architecture.md` §5.4 (short
-form + paths-to-beat live there). **Last updated 2026-07-13** (v4 final;
-truncation eval preliminary — crop_v4 mid-training rerun pending).
-P68 = 68th percentile of |Δt residual|.
+form + paths-to-beat live there). **Last updated 2026-07-14** (both v4
+runs final; truncation eval final). P68 = 68th percentile of |Δt residual|.
 
 ## Our classical stack (measured)
 
@@ -24,6 +23,7 @@ corrects. Every row below includes the GP's 4 s.
 | stage | what it is | P68 | cost / system | status |
 |---|---|---|---|---|
 | GP → transformer | anchored correction + calibrated σ per system | **2.07 d** all / **1.91 d** hinted (= GP tie, unbiased) | 4 s + 18 ms (CPU) | measured |
+| GP → transformer (crop-trained, deep31k_crop_v4) | same + observer-window crop augmentation in training | 2.10 d clean val; 1.85 d on mildly truncated curves | same | measured (final, best ep 24) |
 | GP → transformer, hints withheld | curves + anchor only (GP-failure drill) | 2.93 d (v2 arch); v4 unmeasured (weaker fallback branch by design) | same | partial |
 | transformer, no GP at all | — | impossible as built (no clock zero-point) | — | structural |
 | GP → transformer → SNTD fast | sampling inside transformer dt ± 4σ windows + theta/dust priors (the extra the GP can't give) | expected ≈ 1.48 d; unknown if priors tighten posteriors / cut fit time | ~4.5 min | **NOT RUN** — queued (~4 h for 50 systems) |
@@ -34,26 +34,26 @@ GP-fail systems (poor: ~200 d), joint mag-ratio/SN-param/micro heads.
 Where it adds none (measured, 07-13): tier-1 delay accuracy — tie at every
 quantile, every GP-quality class, and the outlier tail.
 
-## Truncation evaluation (07-13, `scripts/eval_truncated.py`)
+## Truncation evaluation (FINAL 07-14, `scripts/eval_truncated.py`)
 
 889 val systems clipped to a random 365 d observer window (seeded,
 deterministic); GP re-run on the clipped curves (0 hard failures);
 models scored with the clipped-GP hints — the realistic inference chain.
 
-| category | systems | GP (clipped) | full-trained | crop-trained* |
+| category | systems | GP (clipped) | full-trained | crop-trained |
 |---|---|---|---|---|
 | mild — all peaks kept | 591 | 1.96 d | **1.83 d** | 1.85 d |
 | peak — a non-ref peak lost | 22 | 12.3 d | 20.9 d | 14.5 d (tiny n) |
 | severe — ref peak lost | 255 | 180 d | 183 d | 180 d |
 
-*crop-trained checkpoint was mid-training (epoch ~34/90); rerun pending.
-
 Verdict: the window either preserves the delay information (everyone
 ~2 d; transformer's first small accuracy edge, ~7% over the degraded
 clipped-GP hints) or destroys it (ref peak lost → ~180 d for ALL
-template-free methods; crop training rescues nothing because there is
-nothing to rescue). Open follow-up: can Stage-3 TEMPLATE fits pin a peak
-from tail-only data where template-free methods cannot? Untested.
+template-free methods; crop training rescues nothing — there is nothing
+to rescue). crop_v4 on clean val: P68 2.10 d vs full's 2.07 d — crop
+training costs nothing on ideal data (third consistent replication).
+Open follow-up: can Stage-3 TEMPLATE fits pin a peak from tail-only
+data where template-free methods cannot? Untested.
 
 ## Literature
 
@@ -79,12 +79,23 @@ from tail-only data where template-free methods cannot? Untested.
    **Best accuracy**: SNTD robust (1.14 d @ 55 min). **Best per
    millisecond**: GP alone / GP+transformer (1.9 d).
 4. **Open cells that could still move the board**: transformer-primed
-   SNTD (theta/dust priors); Stage-3 template fits on severely truncated
-   curves (can a shape prior pin a missing peak?); hints-off v4; GausSN
-   on our sims; tier-2 microlensing (no published method attempts joint
-   delay+micro — the differentiator if it works; carries nearly all the
-   transformer's remaining case after the tier-1 tie and truncation
-   null).
+   SNTD (theta/dust priors); Stage-3 fits on severely truncated curves;
+   hints-off v4; GausSN on our sims; tier-2 microlensing.
+5. **Template information is worth ~0.4–0.8 d at survey cadence** — the
+   gap between the template-free class (our GP 1.91 d, GausSN) and
+   primed SNTD (1.48 d). Legitimate for confirmed SNe Ia; GausSN's
+   template-freedom buys generality instead.
+6. **Tier-2 benchmark grid (planned): GP / SNTD-fast / GausSN /
+   transformer on identical micro-on/off matched pairs.** GausSN is the
+   strongest published classical baseline for the microlensed regime —
+   it MARGINALIZES micro inside the fit (delays defended by
+   construction; Refsdal delay stable across micro treatments) while our
+   GP is micro-naive and SNTD's template rigidity is violated per image.
+   Beating only our own micro-naive GP would be a weak tier-2 claim.
+   What stays uniquely ours: we ESTIMATE micro (per-image amplitude,
+   chromaticity — extra science), not just defend against it; and
+   GausSN's simple micro kernels (constant/sigmoid/smooth) may fail on
+   caustic-crossing structure — a fair, testable question.
 
 ## Caveats ledger
 
@@ -96,3 +107,37 @@ from tail-only data where template-free methods cannot? Untested.
   4 s GP prerequisite.
 - Real-data rows (Refsdal, H0pe) benchmark end-to-end practice including
   systematics we don't simulate yet (microlensing, cluster environments).
+
+ours without transformer:
+┌──────────────────┬──────────────────────────────────────────────────────────┬───────────────────────┬─────────────┐
+│      stage       │                        what it is                        │          P68          │ cost/system │
+├──────────────────┼──────────────────────────────────────────────────────────┼───────────────────────┼─────────────┤
+│ GP alone (Stage  │ cross-correlation only                                   │ 1.91 d (this is the   │ 4 s         │
+│ 1)               │                                                          │ 1.9)                  │             │
+├──────────────────┼──────────────────────────────────────────────────────────┼───────────────────────┼─────────────┤
+│ GP → SNTD fast   │ nested sampling of SALT model, started inside the GP's   │ 1.48 d                │ ~4.5 min    │
+│                  │ windows                                                  │                       │             │
+├──────────────────┼──────────────────────────────────────────────────────────┼───────────────────────┼─────────────┤
+│ SNTD robust      │ full nested sampling, wide bounds                        │ 1.14 d                │ ~55 min     │
+└──────────────────┴──────────────────────────────────────────────────────────┴───────────────────────┴─────────────┘
+
+GausSN
+
+┌────────────────┬──────────────────────────────────────────────┬────────────────────────────────┬──────────────────┐
+│     stage      │                  what it is                  │              P68               │   cost/system    │
+├────────────────┼──────────────────────────────────────────────┼────────────────────────────────┼──────────────────┤
+│ survey light   │ Rubin or Roman cadence, no follow-up         │ — (input)                      │ survey (free)    │
+│ curves         │                                              │                                │                  │
+├────────────────┼──────────────────────────────────────────────┼────────────────────────────────┼──────────────────┤
+│                │ ONE latent GP light curve; each image =      │ not quoted in days; 43.6% of   │ ~minutes         │
+│ joint Bayesian │ time-shifted, magnified copy; Δt and         │ Roman (52.9% of Rubin) delays  │ (MCMC/nested     │
+│  GP fit        │ magnifications sampled jointly, curve shape  │ to <5% fractional error        │ sampling)        │
+│                │ marginalized                                 │                                │                  │
+├────────────────┼──────────────────────────────────────────────┼────────────────────────────────┼──────────────────┤
+│ + microlensing │ magnification promoted to time-varying       │ delays "consistent regardless  │ same fit, more   │
+│  kernel        │ function, marginalized in the same fit       │ of microlensing treatment"     │ parameters       │
+│                │                                              │ (their robustness claim)       │                  │
+├────────────────┼──────────────────────────────────────────────┼────────────────────────────────┼──────────────────┤
+│ (no further    │ no template tier, no ML tier, no routing     │ —                              │ —                │
+│ stages)        │                                              │                                │                  │
+└────────────────┴──────────────────────────────────────────────┴────────────────────────────────┴──────────────────┘

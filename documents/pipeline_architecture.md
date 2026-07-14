@@ -103,10 +103,12 @@ Data on disk: `tier1_deep` = 8,286 examples / 2,762 systems (3 noise
 realizations each; splits by lens system 6657/879/750), `tier1_wide` =
 5,055 / 1,685. (`outputs/training/tier1` is the pre-fix set — invalid, see
 fixes.md t0 bug.) Runs so far: v1 pair (07-08, delay head stalled — units
-bug), v2 pair (07-09, +`DT_SCALE` fix: deep_full_v2 val P68 **2.81 d**,
-hints-off 2.93 d — vs GP hint 1.91 d), v3 pair (07-10, +residual delay head
-anchored on the GP hint, zero-init: untrained floor = GP accuracy; target
-< 1.91 d). Checkpoint selection keys on val_dt since 07-10 (fixes.md).
+bug), v2 pair (07-09, +`DT_SCALE` fix: 2.81 d), v3 pair (07-10, +residual
+delay head: 2.47 d), v4 pair on the 31k build (07-12/13, FINAL:
+deep31k_full_v4 **2.07 d** all / **1.91 d** hinted = GP tie, unbiased;
+deep31k_crop_v4 2.10 d — crop costs nothing on clean data). Checkpoint
+selection keys on val_dt since 07-10. Verdict + ladders in
+performance_comparisons.md.
 
 ### Chain C — inference chain (the product; wiring UNBUILT)
 
@@ -505,7 +507,7 @@ fit_time_s` (+ `gp_time_s`, quality in the GP tables). [TO ADD]:
 | 3 | Calibration pass (temperature scaling; mixture head only if aliasing seen) | 1 |
 | 4 | Deep+wide mixed training (~60/40 realistic ratio) + per-tier metrics | 1 |
 | 5 | Dynamic batch padding (2–4× training speedup) | — |
-| 6 | Microlensing injection → tier-2 set; matched-pair ablation | — (the hard one) |
+| 6 | Microlensing injection → tier-2 set; matched-pair ablation with grid GP / SNTD-fast / GausSN / transformer (GausSN = the micro-aware classical baseline to beat; see performance_comparisons.md §board-read 6). Pilot: 100 precomputed-map lenses (collaborator GPU), curves extracted via updated slsim in roman_ml | — (in progress 07-13) |
 | 7 | BayeSN-parallel fitting path (GP/transformer-primed) | — |
 | 8 | Inference driver wiring Chain C + routing rule as code | 1–3 |
 | 9 | `mu_ratio` extraction + `frac_residual` benchmark columns | — (few lines) |
