@@ -188,12 +188,17 @@ for controlled experiments). Legacy `DEFAULT_DEPTH_5SIG` dicts remain in
 cadence, 0.6–1.5 mag too deep; Path B additionally had the t0 double-count
 bug — see fixes.md). Chain-A benchmarks are internally valid but optimistic.
 
-**Path C — microlensing injection (UNBUILT, tier 2):** per image, draw a
-magnification map (κ, γ, s from the macro model), convolve with the growing
-chromatic SN photosphere → `μ_micro(t, band)`; multiply into the flux before
-noise; store the curve as a truth label. Tier flag per system: 0 = SN only,
-1 = +macro (current sets), 2 = +micro, 3 = +milli. One network trains on all
-tiers; the flag is for curriculum/ablation, never a network input.
+**Path C — microlensing injection (BUILT 07-16, tier 2):** precomputed
+per-image `Δm(t, band)` curves (collaborator GPU maps → portable .npz via
+`scripts/extract_micro_curves.py`) are read by `roman_td/micro.py` and
+multiplied into the flux before noise in `simulate_photometry(micro=...)`.
+`build_training_set.py --micro_dir` writes matched twins: tier1 (macro) and
+tier2 (microlensed) share lens, SN, and noise seed — the within-pair
+difference is micro alone. Real per-image `micro_amp` labels (mean Δmag at
+the observed epochs) + per-band mean/std + κ*/κ/γ in the tier-2 records.
+Tier flag per system: 0 = SN only, 1 = +macro, 2 = +micro, 3 = +milli
+(unbuilt). One network trains on all tiers; the flag is for
+curriculum/ablation, never a network input.
 
 ---
 
@@ -507,7 +512,7 @@ fit_time_s` (+ `gp_time_s`, quality in the GP tables). [TO ADD]:
 | 3 | Calibration pass (temperature scaling; mixture head only if aliasing seen) | 1 |
 | 4 | Deep+wide mixed training (~60/40 realistic ratio) + per-tier metrics | 1 |
 | 5 | Dynamic batch padding (2–4× training speedup) | — |
-| 6 | Microlensing injection → tier-2 set; matched-pair ablation with grid GP / SNTD-fast / GausSN / transformer (GausSN = the micro-aware classical baseline to beat; see performance_comparisons.md §board-read 6). Pilot: 100 precomputed-map lenses (collaborator GPU), curves extracted via updated slsim in roman_ml | — (in progress 07-13) |
+| 6 | Microlensing injection → tier-2 set; matched-pair ablation with grid GP / SNTD-fast / GausSN / transformer (GausSN = the micro-aware classical baseline to beat; see performance_comparisons.md §board-read 6). Pilot DONE 07-16: 48 matched pairs from the 100 GPU-map lenses; GP delay perturbation P68 1.32 d, systematic per system, common-mode −0.13 d (see performance_comparisons.md §tier-2 pilot). Next: GausSN/SNTD/transformer on the same pairs; scale via collaborator GPU on 31k population | pilot done 07-16 |
 | 7 | BayeSN-parallel fitting path (GP/transformer-primed) | — |
 | 8 | Inference driver wiring Chain C + routing rule as code | 1–3 |
 | 9 | `mu_ratio` extraction + `frac_residual` benchmark columns | — (few lines) |

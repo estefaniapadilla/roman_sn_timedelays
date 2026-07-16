@@ -55,6 +55,35 @@ training costs nothing on ideal data (third consistent replication).
 Open follow-up: can Stage-3 TEMPLATE fits pin a peak from tail-only
 data where template-free methods cannot? Untested.
 
+## Tier-2 pilot: GP under microlensing (07-16, `scripts/compare_micro_pairs.py`)
+
+48 matched pairs (100 GPU-map lenses × 3 noise realizations, detection cuts
+→ 51 image-delays): tier1/tier2 twins share lens, SN, and noise seed, so
+err_on − err_off is caused by microlensing alone.
+
+| | micro OFF | micro ON |
+|---|---|---|
+| P68 \|err\| | 2.14 d | 1.94 d |
+| median signed err | −0.38 d | −1.26 d |
+| P95 \|err\| | 13.7 d | 13.4 d |
+
+Paired perturbation: median 0.67 d, **P68 1.32 d**, P95 5.1 d,
+common-mode −0.13 d (consistent with 0 at n=51).
+
+1. Micro perturbs single GP delays at the scale of the GP's own tier-1
+   bar (1.3 vs 1.9 d) — material, not catastrophic.
+2. **Systematic per system**: lens_00020 shifts −4.5 d in all 3 noise
+   realizations — repeat visits never average it away; only averaging
+   across systems does.
+3. Quiet ≠ safe: variability split weak (1.11 vs 1.48 d); the worst case
+   has std 0.019 mag but a −1.32 mag STATIC offset. Damage flows through
+   detection/SNR structure, not just wiggles — a component GausSN's
+   time-varying kernels don't target (testable claim).
+4. Micro flipped image detectability in 6/300 realizations (2%).
+
+Caveats: 48-pair pilot; one star-field realization per lens; scale-up =
+collaborator GPU batch on the 31k population (backlog).
+
 ## Literature
 
 | method | what it is | precision | cost / system | conditions |
