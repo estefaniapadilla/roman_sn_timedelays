@@ -189,6 +189,7 @@ def simulate_photometry(
     depths: Dict[str, float],
     rng: np.random.Generator,
     sn_params: Optional[Dict[str, float]] = None,
+    micro: Optional[Any] = None,
 ) -> Tuple[Optional[at.Table], Dict[str, Any]]:
     """Simulate Roman photometry for all lensed images of one system using BayeSN.
 
@@ -198,6 +199,13 @@ def simulate_photometry(
     ``cadence_days`` may be a single number (all bands share one grid) or a
     per-band dict (SURVEY_CADENCE[tier]) — the HLTDS observes one anchor
     filter every 5 d and the others every other visit (10 d).
+
+    ``micro``, if given, is a per-image chromatic microlensing model
+    (roman_td.micro.MicroCurves): calling it as
+    ``micro(band, image_index, t_since_explosion)`` returns delta-mags that
+    multiply the noiseless flux by 10**(-0.4*dm). Image indices must be in
+    arrival-time order (MicroCurves sorts at load). Does not consume ``rng``,
+    so micro-on/off runs with the same seed share the identical noise draw.
 
     Returns
     -------
@@ -262,6 +270,12 @@ def simulate_photometry(
                 continue
             f_true = mu_k * model.bandflux(b, t_obs - dt, zp=ZP, zpsys=ZPSYS)
             f_true = np.where(np.isfinite(f_true), f_true, 0.0)
+            if micro is not None:
+                # micro clock starts at ~explosion; builder clock at peak
+                from roman_td.micro import REST_DAYS_EXPLOSION_TO_PEAK
+                t_expl = (t_obs - t0 - dt) + \
+                    REST_DAYS_EXPLOSION_TO_PEAK * (1.0 + zS)
+                f_true = f_true * 10.0 ** (-0.4 * micro(b, k, t_expl))
             f_obs = f_true + rng.normal(0, ferr, size=len(t_obs))
             max_snr = max(max_snr, float(np.max(f_true) / ferr) if len(f_true) else 0.0)
             for t, fo in zip(t_obs, f_obs):
