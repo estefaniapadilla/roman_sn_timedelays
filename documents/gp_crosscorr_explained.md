@@ -307,3 +307,29 @@ anything.
 | `MIN_CORR` | 0.3 | below this, `fail` | noisier surveys |
 | `n_draws` | 30 | error-bar fidelity | 50+ for publication-grade σ |
 | good/broad threshold | 5 d | flag boundary | tie to cadence if it changes |
+
+
+┌───────────────────┬────────────────────────────────────────┬──────────────────────────────────────────────────────────────────────────────────────────┐
+│      output       │               what it is               │                                     who consumes it                                      │
+├───────────────────┼────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────┤
+│ ref_image         │ which image it picked as the reference │ everything downstream is relative to this                                                │
+│                   │  (usually the best-measured one)       │                                                                                          │
+├───────────────────┼────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────┤
+│ t_peak_ref        │ date of the reference image's peak     │ the phase zero-point — the transformer's clock is anchored here (this is why the         │
+│                   │                                        │ transformer "cannot run without the GP")                                                 │
+├───────────────────┼────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────┤
+│ dt_gp per image   │ time delay vs the reference — the      │ transformer hint + anchor; SNTD's search windows                                         │
+│                   │ headline output (P68 1.91 d)           │                                                                                          │
+├───────────────────┼────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────┤
+│ dt_gp_err per     │ its error bar from the                 │ window sizing; hint weighting                                                            │
+│ image             │ cross-correlation width                │                                                                                          │
+├───────────────────┼────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────┤
+│                   │ the delay measured in each filter      │ consistency check — micro is chromatic, so band-to-band disagreement is a micro symptom  │
+│ dt_per_band       │ separately                             │ (noted in the architecture doc as a microlensing indicator, though nothing consumes it   │
+│                   │                                        │ quantitatively yet)                                                                      │
+├───────────────────┼────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────┤
+│ flux_ratio ± err  │ brightness ratio image/reference from  │ magnification estimate — the classical counterpart of the transformer's logmu head       │
+│ per image         │ the shifted GP peaks                   │                                                                                          │
+├───────────────────┼────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────────┤
+│ quality per image │ good / broad / multipeak / poor flag   │ routing and the quality-split analyses we've been reporting                              │
+└───────────────────┴────────────────────────────────────────┴──────────────────────────────────────────────────────────────────────────────────────────┘

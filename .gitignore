@@ -24,3 +24,7 @@ __pycache__/
 .cursor/
 *.swp
 .DS_Store
+
+# Collaborator dataset-generation bundle (reference only, not our code)
+full_Roman_lSNe_dataset_gen.zip
+micro_dataset_gen/
