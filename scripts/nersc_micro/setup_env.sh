@@ -22,8 +22,10 @@ cd slsim
 git pull
 pip install -e .
 
-# Light-curve generation extras (no GPU libs needed: magmaps are cached)
-pip install sncosmo speclite tqdm
+# Light-curve generation extras (no GPU libs needed: magmaps are cached).
+# skypy: imported unconditionally by slsim.Pipelines but not declared as a
+# hard dependency by slsim's own install.
+pip install sncosmo speclite tqdm skypy
 
 python - <<'EOF'
 import slsim, sncosmo, speclite
