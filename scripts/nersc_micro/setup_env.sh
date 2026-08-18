@@ -20,12 +20,11 @@ if [[ ! -d slsim ]]; then
 fi
 cd slsim
 git pull
+# slsim's `pip install -e .` does NOT install its runtime deps — they live in
+# requirements.txt (skypy, lenstronomy, sncosmo, speclite, ...). Install those
+# first, then slsim itself. No GPU libs needed: magmaps are cached.
+pip install -r requirements.txt
 pip install -e .
-
-# Light-curve generation extras (no GPU libs needed: magmaps are cached).
-# skypy: imported unconditionally by slsim.Pipelines but not declared as a
-# hard dependency by slsim's own install.
-pip install sncosmo speclite tqdm skypy
 
 python - <<'EOF'
 import slsim, sncosmo, speclite
